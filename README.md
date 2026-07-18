@@ -2,8 +2,8 @@
 
 Purewave is a step sequencer intended to grow toward a full digital audio
 workstation over time. The early architecture should keep sequencing, audio
-I/O, MIDI I/O, plugin hosting/export concerns, and platform backends separated
-enough that the project can expand without rewriting the timing core.
+I/O, MIDI I/O, plugin-format entry points, and platform backends separated enough
+that the project can expand without rewriting the timing core.
 
 ## Current Product Requirements
 
@@ -34,11 +34,24 @@ Audio dependency policy:
 - Do not use third-party audio libraries beyond raw language bindings to the
   required platform and plugin APIs.
 
+Architecture layering:
+
+- Keep a separate engine layer for sequencing, timing, transport, MIDI/audio
+  rendering, and backend-facing realtime contracts.
+- Keep a separate app layer for frontend applications, standalone shells, plugin
+  entry points, UI workflows, and platform presentation concerns.
+- The layer boundary should make it straightforward to add more frontend apps
+  without rewriting or forking the engine.
+
 ## Engineering Direction
 
 The timing engine is the center of the application. Work that touches scheduling,
 transport, plugin callbacks, MIDI emission, or audio rendering should preserve
 sample-accurate behavior across standalone and plugin modes.
+
+Application and plugin frontends should call into the engine through narrow
+interfaces. They should not own sequencing semantics, transport rules, or
+sample-accurate scheduling.
 
 Backend support should be abstracted behind explicit platform interfaces. JACK,
 ASIO, WASAPI, CoreAudio, and plugin-format integrations should not leak into the

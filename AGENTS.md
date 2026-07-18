@@ -25,11 +25,18 @@ small, documented, and friendly to future standalone and plugin builds.
 - Windows WASAPI and macOS CoreAudio are second-class audio backends.
 - Third-party audio libraries are not allowed beyond raw language bindings to
   platform and plugin APIs.
+- Architecture must keep a separate app layer and engine layer so additional
+  frontend apps can be added without duplicating engine behavior.
 
 ## Engineering Guidance
 
 - Keep the sequencing/timing core independent from platform audio backends and
   plugin-format glue.
+- Keep frontend applications, standalone shells, plugin entry points, and UI
+  workflows in the app layer. Keep sequencing, timing, transport, MIDI/audio
+  rendering, and backend-facing realtime contracts in the engine layer.
+- App-layer code should depend on narrow engine interfaces; it should not own
+  sequencing semantics or sample-accurate scheduling.
 - Do not put allocation, blocking I/O, logging, or lock-heavy coordination on an
   audio callback path without an explicit design note.
 - Prefer small interfaces around platform-specific backends so JACK, ASIO,

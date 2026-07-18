@@ -9,6 +9,8 @@ small, documented, and friendly to future standalone and plugin builds.
 
 - Make incremental commits as work progresses.
 - Ask the user before amending any commit before `HEAD`.
+- Confirm with the user when unsure about UX or technical direction unless they
+  have explicitly allowed proceeding without confirmation.
 - Spawn a clean agent to cross-check changes before final handoff.
 - Keep `README.md` and `AGENTS.md` updated as requirements and architecture
   decisions evolve.

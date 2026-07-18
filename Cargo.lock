@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
-name = "purewave"
+name = "purewave-cli"
+version = "0.1.0"
+dependencies = [
+ "purewave-engine",
+]
+
+[[package]]
+name = "purewave-engine"
 version = "0.1.0"

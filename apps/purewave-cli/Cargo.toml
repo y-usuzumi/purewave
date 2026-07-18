@@ -1,0 +1,7 @@
+[package]
+name = "purewave-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+purewave-engine = { path = "../../crates/purewave-engine" }

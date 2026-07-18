@@ -65,6 +65,13 @@ Raspberry Pi 5 is a first-class target, so performance, dependency footprint,
 startup behavior, and real-time safety should be considered during design rather
 than treated as late portability work.
 
+## Repository Layout
+
+- `crates/purewave-engine`: reusable sequencing, timing, transport, and MIDI
+  scheduling engine.
+- `apps/purewave-cli`: temporary app-layer smoke-test shell until the Tauri/Solid
+  standalone frontend is added.
+
 ## MVP Scope
 
 The first implementation target is a Linux JACK standalone application, with

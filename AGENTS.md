@@ -47,6 +47,10 @@ small, documented, and friendly to future standalone and plugin builds.
 
 - Keep the sequencing/timing core independent from platform audio backends and
   plugin-format glue.
+- Put reusable sequencing, timing, transport, and MIDI scheduling code in
+  `crates/purewave-engine`.
+- Treat `apps/purewave-cli` as a temporary app-layer smoke-test shell until the
+  Tauri/Solid frontend is added.
 - Keep frontend applications, standalone shells, plugin entry points, and UI
   workflows in the app layer. Keep sequencing, timing, transport, MIDI/audio
   rendering, and backend-facing realtime contracts in the engine layer.

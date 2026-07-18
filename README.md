@@ -72,6 +72,27 @@ than treated as late portability work.
 - `apps/purewave-cli`: temporary app-layer smoke-test shell until the Tauri/Solid
   standalone frontend is added.
 
+## Current Status
+
+Purewave is not yet a usable standalone sequencer. The current build contains
+the first engine slice: the default drum-grid model, MIDI note message types, and
+sample-position scheduling tests.
+
+The temporary CLI only confirms that the app layer can link the engine:
+
+```sh
+cargo run -p purewave-cli
+```
+
+Expected output:
+
+```text
+Purewave engine ready: 6 tracks, 16 steps
+```
+
+It does not yet create a JACK client, open MIDI ports, emit MIDI to an external
+DAW, or provide a Tauri/Solid UI.
+
 ## MVP Scope
 
 The first implementation target is a Linux JACK standalone application, with
@@ -109,4 +130,7 @@ future plugin formats.
 
 ## TODO
 
+- Add a JACK MIDI standalone app that creates an output port and emits scheduled
+  notes from the engine.
+- Add the Tauri/Solid grid UI.
 - Add MIDI control events after the initial note-output MVP.

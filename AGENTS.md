@@ -23,6 +23,8 @@ small, documented, and friendly to future standalone and plugin builds.
 - Linux JACK and Windows ASIO are first-class audio backends.
 - Raspberry Pi 5 is a first-class platform target.
 - Windows WASAPI and macOS CoreAudio are second-class audio backends.
+- Third-party audio libraries are not allowed beyond raw language bindings to
+  platform and plugin APIs.
 
 ## Engineering Guidance
 
@@ -32,6 +34,8 @@ small, documented, and friendly to future standalone and plugin builds.
   audio callback path without an explicit design note.
 - Prefer small interfaces around platform-specific backends so JACK, ASIO,
   WASAPI, CoreAudio, VST3, CLAP, and LV2 can evolve independently.
+- Use raw language bindings for audio and plugin APIs; do not introduce
+  higher-level third-party audio libraries or engines.
 - Treat Raspberry Pi 5 constraints as design inputs for performance-sensitive
   code.
 - Update this file when new requirements change architecture expectations.

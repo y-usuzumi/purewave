@@ -7,8 +7,8 @@ that the project can expand without rewriting the timing core.
 
 ## Current Product Requirements
 
-Purewave must provide sample-accurate sequencing for both MIDI and audio
-output.
+Long-term Purewave must provide sample-accurate sequencing for both MIDI and
+audio output. The MVP emits MIDI only.
 
 Target deployment modes:
 
@@ -33,6 +33,9 @@ Audio dependency policy:
 
 - Do not use third-party audio libraries beyond raw language bindings to the
   required platform and plugin APIs.
+- Plugin generation libraries are acceptable when they do not constrain the
+  engine or prevent Purewave from meeting timing, platform, and format
+  requirements.
 
 Architecture layering:
 
@@ -61,3 +64,42 @@ bindings rather than higher-level third-party audio libraries or engines.
 Raspberry Pi 5 is a first-class target, so performance, dependency footprint,
 startup behavior, and real-time safety should be considered during design rather
 than treated as late portability work.
+
+## MVP Scope
+
+The first implementation target is a Linux JACK standalone application, with
+Raspberry Pi 5 support coming next. The standalone frontend should use Tauri
+with Solid and call into the engine in-process.
+
+The MVP sequencer is a 16-step, one-bar, 4/4 grid. It starts with six tracks:
+
+- Tom.
+- Kick.
+- Snare.
+- Hi-hat.
+- Cymbal.
+- Clap.
+
+The MVP emits MIDI only to an external destination. All tracks may initially use
+the same MIDI channel, with different MIDI note numbers per sound. The default
+mapping should follow General MIDI drum conventions where practical:
+
+- Kick: note 36.
+- Snare: note 38.
+- Clap: note 39.
+- Hi-hat: note 42.
+- Tom: note 45.
+- Cymbal: note 49.
+
+Each step stores whether it is enabled, plus note, velocity, and gate length.
+Standalone mode should provide internal BPM, play/stop, and loop length controls.
+When running as a plugin, Purewave should respect host tempo and transport.
+Standalone JACK integration should use JACK transport where practical.
+
+CLAP is part of the MVP plugin target because Bitwig Studio supports CLAP and
+VST/VST3, but not LV2 as a primary plugin path. VST3 and LV2 remain required
+future plugin formats.
+
+## TODO
+
+- Add MIDI control events after the initial note-output MVP.

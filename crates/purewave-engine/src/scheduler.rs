@@ -38,6 +38,9 @@ pub struct TimedMidiEvent {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DroppedEventCount(pub usize);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Scheduler;
 
 impl Scheduler {
@@ -47,6 +50,20 @@ impl Scheduler {
         transport: Transport,
         frame_count: u32,
     ) -> Vec<TimedMidiEvent> {
+        let mut events = Vec::new();
+        self.schedule_midi_block_into(pattern, transport, frame_count, &mut events);
+        events
+    }
+
+    pub fn schedule_midi_block_into(
+        &self,
+        pattern: &Pattern,
+        transport: Transport,
+        frame_count: u32,
+        events: &mut Vec<TimedMidiEvent>,
+    ) {
+        events.clear();
+
         if !transport.playing
             || frame_count == 0
             || pattern.step_count() == 0
@@ -54,7 +71,7 @@ impl Scheduler {
             || !is_positive_finite(transport.sample_rate_hz)
             || !is_positive_finite(transport.tempo_bpm)
         {
-            return Vec::new();
+            return;
         }
 
         let block = BlockPosition {
@@ -62,7 +79,34 @@ impl Scheduler {
             frame_count,
         };
 
-        self.schedule_playing_block(pattern, transport, block)
+        self.schedule_playing_block(pattern, transport, block, events, false);
+    }
+
+    pub fn schedule_midi_block_into_existing_capacity(
+        &self,
+        pattern: &Pattern,
+        transport: Transport,
+        frame_count: u32,
+        events: &mut Vec<TimedMidiEvent>,
+    ) -> DroppedEventCount {
+        events.clear();
+
+        if !transport.playing
+            || frame_count == 0
+            || pattern.step_count() == 0
+            || pattern.steps_per_beat == 0
+            || !is_positive_finite(transport.sample_rate_hz)
+            || !is_positive_finite(transport.tempo_bpm)
+        {
+            return DroppedEventCount::default();
+        }
+
+        let block = BlockPosition {
+            start_sample: transport.position_samples,
+            frame_count,
+        };
+
+        self.schedule_playing_block(pattern, transport, block, events, true)
     }
 
     fn schedule_playing_block(
@@ -70,13 +114,15 @@ impl Scheduler {
         pattern: &Pattern,
         transport: Transport,
         block: BlockPosition,
-    ) -> Vec<TimedMidiEvent> {
+        events: &mut Vec<TimedMidiEvent>,
+        use_existing_capacity: bool,
+    ) -> DroppedEventCount {
         let samples_per_step = samples_per_step(pattern, transport);
         let block_start = block.start_sample;
         let block_end = block_start + u64::from(block.frame_count);
         let scan_start_step = first_step_to_scan(block_start, samples_per_step);
         let scan_end_step = ((block_end as f64 / samples_per_step).ceil() as i64) + 1;
-        let mut events = Vec::new();
+        let mut dropped = 0;
 
         for absolute_step in scan_start_step..=scan_end_step {
             if absolute_step < 0 {
@@ -98,31 +144,52 @@ impl Scheduler {
                 let note_end = note_start + gate_samples(*step, samples_per_step);
 
                 if note_start >= block_start && note_start < block_end {
-                    events.push(TimedMidiEvent {
+                    let event = TimedMidiEvent {
                         frame_offset: (note_start - block_start) as u32,
                         message: MidiMessage::NoteOn {
                             channel: track.channel,
                             note: step.note,
                             velocity: step.velocity,
                         },
-                    });
+                    };
+
+                    if push_event(events, event, use_existing_capacity) {
+                        dropped += 1;
+                    }
                 }
 
                 if note_end >= block_start && note_end < block_end {
-                    events.push(TimedMidiEvent {
+                    let event = TimedMidiEvent {
                         frame_offset: (note_end - block_start) as u32,
                         message: MidiMessage::NoteOff {
                             channel: track.channel,
                             note: step.note,
                         },
-                    });
+                    };
+
+                    if push_event(events, event, use_existing_capacity) {
+                        dropped += 1;
+                    }
                 }
             }
         }
 
-        events.sort_by_key(|event| (event.frame_offset, event.message.sort_priority()));
-        events
+        events.sort_unstable_by_key(|event| (event.frame_offset, event.message.sort_priority()));
+        DroppedEventCount(dropped)
     }
+}
+
+fn push_event(
+    events: &mut Vec<TimedMidiEvent>,
+    event: TimedMidiEvent,
+    use_existing_capacity: bool,
+) -> bool {
+    if use_existing_capacity && events.len() == events.capacity() {
+        return true;
+    }
+
+    events.push(event);
+    false
 }
 
 fn samples_per_step(pattern: &Pattern, transport: Transport) -> f64 {
@@ -259,6 +326,42 @@ mod tests {
                 .schedule_midi_block(&pattern, zero_sample_rate, 512)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn scheduler_can_reuse_existing_event_storage() {
+        let mut pattern = Pattern::default_drum_grid();
+        pattern.tracks[0].enable_step(0);
+        let transport = Transport::new(48_000.0, 120.0, 0, true);
+        let mut events = Vec::with_capacity(32);
+        let initial_capacity = events.capacity();
+
+        Scheduler.schedule_midi_block_into(&pattern, transport, 6_001, &mut events);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events.capacity(), initial_capacity);
+    }
+
+    #[test]
+    fn bounded_scheduler_drops_events_instead_of_growing_storage() {
+        let mut pattern = Pattern::default_drum_grid();
+        for track in &mut pattern.tracks {
+            track.enable_step(0);
+        }
+        let transport = Transport::new(48_000.0, 120.0, 0, true);
+        let mut events = Vec::with_capacity(4);
+        let initial_capacity = events.capacity();
+
+        let dropped = Scheduler.schedule_midi_block_into_existing_capacity(
+            &pattern,
+            transport,
+            6_001,
+            &mut events,
+        );
+
+        assert_eq!(events.capacity(), initial_capacity);
+        assert_eq!(events.len(), initial_capacity);
+        assert_eq!(dropped.0, 8);
     }
 
     fn note_off(note: u8) -> MidiMessage {

@@ -51,6 +51,9 @@ small, documented, and friendly to future standalone and plugin builds.
   `crates/purewave-engine`.
 - Treat `apps/purewave-cli` as a temporary app-layer smoke-test shell until the
   Tauri/Solid frontend is added.
+- Keep Linux JACK standalone MIDI output in `apps/purewave-jack`.
+- The initial playable seed pattern is Kick on steps 1/5/9/13, Snare and Clap on
+  5/13, Hi-hat on every odd-numbered step, and Cymbal on step 1.
 - Keep frontend applications, standalone shells, plugin entry points, and UI
   workflows in the app layer. Keep sequencing, timing, transport, MIDI/audio
   rendering, and backend-facing realtime contracts in the engine layer.

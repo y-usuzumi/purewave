@@ -1,0 +1,8 @@
+[package]
+name = "purewave-jack"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+jack-sys = "0.5"
+purewave-engine = { path = "../../crates/purewave-engine" }

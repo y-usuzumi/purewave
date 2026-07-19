@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/purewave-cli",
+    "apps/purewave-jack",
     "crates/purewave-engine",
 ]
 resolver = "3"

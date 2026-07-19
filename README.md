@@ -71,12 +71,14 @@ than treated as late portability work.
   scheduling engine.
 - `apps/purewave-cli`: temporary app-layer smoke-test shell until the Tauri/Solid
   standalone frontend is added.
+- `apps/purewave-jack`: Linux JACK MIDI standalone app for the first playable
+  MVP path.
 
 ## Current Status
 
-Purewave is not yet a usable standalone sequencer. The current build contains
-the first engine slice: the default drum-grid model, MIDI note message types, and
-sample-position scheduling tests.
+Purewave is not yet a complete standalone sequencer with an editable UI. The
+current build contains the first engine slice: the default drum-grid model, MIDI
+note message types, and sample-position scheduling tests.
 
 The temporary CLI only confirms that the app layer can link the engine:
 
@@ -90,8 +92,22 @@ Expected output:
 Purewave engine ready: 6 tracks, 16 steps
 ```
 
-It does not yet create a JACK client, open MIDI ports, emit MIDI to an external
-DAW, or provide a Tauri/Solid UI.
+The temporary CLI does not create a JACK client, open MIDI ports, emit MIDI to an
+external DAW, or provide a Tauri/Solid UI.
+
+The JACK app is the first playable target. It creates a `purewave:midi_out`
+JACK MIDI port and follows JACK transport state:
+
+```sh
+cargo run -p purewave-jack
+```
+
+Connect `purewave:midi_out` to a DAW or instrument MIDI input, then start JACK
+transport. The seeded pattern uses Kick on steps 1/5/9/13, Snare and Clap on
+5/13, Hi-hat on every odd-numbered step, and Cymbal on step 1.
+
+If JACK is not running, the app exits with a message asking whether the JACK
+server is running.
 
 ## MVP Scope
 
@@ -130,7 +146,5 @@ future plugin formats.
 
 ## TODO
 
-- Add a JACK MIDI standalone app that creates an output port and emits scheduled
-  notes from the engine.
 - Add the Tauri/Solid grid UI.
 - Add MIDI control events after the initial note-output MVP.

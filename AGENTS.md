@@ -52,6 +52,12 @@ small, documented, and friendly to future standalone and plugin builds.
 - Treat `apps/purewave-cli` as a temporary app-layer smoke-test shell until the
   Tauri/Solid frontend is added.
 - Keep Linux JACK standalone MIDI output in `apps/purewave-jack`.
+- The JACK standalone app also exposes an ALSA sequencer output named
+  `Purewave MIDI` so Bitwig can discover it as a Generic MIDI Keyboard input.
+  Treat this as a compatibility bridge only: it runs outside the JACK callback
+  and does not provide a sample-accurate timing guarantee.
+- Keep ALSA bridge delivery off the JACK callback. The JACK MIDI path remains
+  the sample-accurate standalone output path.
 - The initial playable seed pattern is Kick on steps 1/5/9/13, Snare and Clap on
   5/13, Hi-hat on every odd-numbered step, and Cymbal on step 1.
 - Keep frontend applications, standalone shells, plugin entry points, and UI

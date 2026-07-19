@@ -96,15 +96,26 @@ The temporary CLI does not create a JACK client, open MIDI ports, emit MIDI to a
 external DAW, or provide a Tauri/Solid UI.
 
 The JACK app is the first playable target. It creates a `purewave:midi_out`
-JACK MIDI port and follows JACK transport state:
+JACK MIDI port, a `Purewave MIDI` ALSA sequencer output for DAW discovery, and
+follows JACK transport state:
 
 ```sh
 cargo run -p purewave-jack
 ```
 
-Connect `purewave:midi_out` to a DAW or instrument MIDI input, then start JACK
-transport. The seeded pattern uses Kick on steps 1/5/9/13, Snare and Clap on
-5/13, Hi-hat on every odd-numbered step, and Cymbal on step 1.
+For JACK-aware instruments and DAWs, connect `purewave:midi_out` to a MIDI
+input, then start JACK transport. The JACK path is the sample-accurate MIDI
+output path.
+
+For Bitwig Studio on Linux, add a `Generic` > `MIDI Keyboard` controller in
+Bitwig's Dashboard settings and select the `Purewave MIDI` input port. Use that
+controller as a note source for an armed instrument track, then start JACK
+transport. This ALSA sequencer output exists for DAW compatibility; it is
+delivered from a dedicated app thread and is not sample-accurate. It must not be
+used as the timing reference for future sample-accurate DAW/plugin integration.
+
+The seeded pattern uses Kick on steps 1/5/9/13, Snare and Clap on 5/13, Hi-hat
+on every odd-numbered step, and Cymbal on step 1.
 
 If JACK is not running, the app exits with a message asking whether the JACK
 server is running.

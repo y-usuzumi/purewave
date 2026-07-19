@@ -4,5 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+alsa-sys = "0.3"
 jack-sys = "0.5"
 purewave-engine = { path = "../../crates/purewave-engine" }

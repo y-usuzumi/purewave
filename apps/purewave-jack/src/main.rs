@@ -1,5 +1,5 @@
 use alsa_sys::{
-    SND_SEQ_ADDRESS_SUBSCRIBERS, SND_SEQ_ADDRESS_UNKNOWN, SND_SEQ_OPEN_OUTPUT,
+    SND_SEQ_ADDRESS_SUBSCRIBERS, SND_SEQ_ADDRESS_UNKNOWN, SND_SEQ_NONBLOCK, SND_SEQ_OPEN_OUTPUT,
     SND_SEQ_QUEUE_DIRECT, snd_midi_event_encode, snd_midi_event_free, snd_midi_event_new,
     snd_midi_event_reset_encode, snd_midi_event_t, snd_seq_close, snd_seq_create_simple_port,
     snd_seq_event_output_direct, snd_seq_event_t, snd_seq_open, snd_seq_set_client_name, snd_seq_t,
@@ -289,14 +289,23 @@ impl AlsaMidiBridge {
     fn open() -> Result<Self, AlsaMidiError> {
         let queue = Arc::new(AlsaEventQueue::new());
         let dropped_events = Arc::new(AtomicUsize::new(0));
+        let note_cleanup_requested = Arc::new(AtomicBool::new(false));
         let running = Arc::new(AtomicBool::new(true));
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let worker_queue = Arc::clone(&queue);
         let worker_running = Arc::clone(&running);
+        let worker_note_cleanup_requested = Arc::clone(&note_cleanup_requested);
 
         let worker = thread::Builder::new()
             .name("purewave-alsa-midi".to_owned())
-            .spawn(move || run_alsa_midi_worker(worker_queue, worker_running, ready_sender))
+            .spawn(move || {
+                run_alsa_midi_worker(
+                    worker_queue,
+                    worker_running,
+                    worker_note_cleanup_requested,
+                    ready_sender,
+                )
+            })
             .map_err(AlsaMidiError::SpawnWorker)?;
 
         match ready_receiver.recv() {
@@ -304,6 +313,7 @@ impl AlsaMidiBridge {
                 producer: AlsaMidiProducer {
                     queue,
                     dropped_events,
+                    note_cleanup_requested,
                 },
                 running,
                 worker: Some(worker),
@@ -346,12 +356,14 @@ impl Drop for AlsaMidiBridge {
 struct AlsaMidiProducer {
     queue: Arc<AlsaEventQueue>,
     dropped_events: Arc<AtomicUsize>,
+    note_cleanup_requested: Arc<AtomicBool>,
 }
 
 impl AlsaMidiProducer {
     fn send(&self, message: MidiMessage) {
         if !self.queue.try_push(message) {
             self.dropped_events.fetch_add(1, Ordering::Relaxed);
+            self.note_cleanup_requested.store(true, Ordering::Release);
         }
     }
 }
@@ -359,6 +371,7 @@ impl AlsaMidiProducer {
 fn run_alsa_midi_worker(
     queue: Arc<AlsaEventQueue>,
     running: Arc<AtomicBool>,
+    note_cleanup_requested: Arc<AtomicBool>,
     ready_sender: mpsc::SyncSender<Result<(), AlsaMidiError>>,
 ) {
     let mut output = match AlsaSequencerOutput::open() {
@@ -376,34 +389,66 @@ fn run_alsa_midi_worker(
     let mut reported_output_error = false;
 
     while running.load(Ordering::Acquire) {
-        if !drain_alsa_events(&queue, &mut output, &mut reported_output_error) {
+        if !drain_alsa_events(
+            &queue,
+            &mut output,
+            &mut reported_output_error,
+            &note_cleanup_requested,
+        ) {
             thread::sleep(Duration::from_millis(1));
         }
     }
 
-    drain_alsa_events(&queue, &mut output, &mut reported_output_error);
-    output.send_note_off_for_active_notes();
+    drain_alsa_events(
+        &queue,
+        &mut output,
+        &mut reported_output_error,
+        &note_cleanup_requested,
+    );
+
+    for _ in 0..10 {
+        if output.send_note_off_for_active_notes() {
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn drain_alsa_events(
     queue: &AlsaEventQueue,
     output: &mut AlsaSequencerOutput,
     reported_output_error: &mut bool,
+    note_cleanup_requested: &AtomicBool,
 ) -> bool {
     let mut sent_event = false;
 
     while let Some(message) = queue.try_pop() {
         sent_event = true;
 
-        if let Err(code) = output.send(message)
-            && !*reported_output_error
-        {
-            eprintln!("ALSA MIDI compatibility bridge stopped delivering events: {code}");
-            *reported_output_error = true;
+        if let Err(code) = output.send(message) {
+            if is_would_block(code) {
+                note_cleanup_requested.store(true, Ordering::Release);
+            } else if !*reported_output_error {
+                eprintln!("ALSA MIDI compatibility bridge stopped delivering events: {code}");
+                *reported_output_error = true;
+            }
+        }
+    }
+
+    if note_cleanup_requested.swap(false, Ordering::AcqRel) {
+        sent_event = true;
+
+        if !output.send_note_off_for_active_notes() {
+            note_cleanup_requested.store(true, Ordering::Release);
         }
     }
 
     sent_event
+}
+
+fn is_would_block(code: i32) -> bool {
+    std::io::Error::from_raw_os_error(-code).kind() == std::io::ErrorKind::WouldBlock
 }
 
 struct AlsaSequencerOutput {
@@ -427,7 +472,7 @@ impl AlsaSequencerOutput {
                 &mut sequencer,
                 default_device.as_ptr(),
                 SND_SEQ_OPEN_OUTPUT,
-                0,
+                SND_SEQ_NONBLOCK,
             )
         };
         if open_result < 0 {
@@ -480,7 +525,9 @@ impl AlsaSequencerOutput {
         Ok(())
     }
 
-    fn send_note_off_for_active_notes(&mut self) {
+    fn send_note_off_for_active_notes(&mut self) -> bool {
+        let mut all_notes_sent = true;
+
         for channel_index in 0..self.active_notes.len() {
             for note_index in 0..self.active_notes[channel_index].len() {
                 if !self.active_notes[channel_index][note_index] {
@@ -494,9 +541,18 @@ impl AlsaSequencerOutput {
                     continue;
                 };
 
-                let _ = self.send_message(MidiMessage::NoteOff { channel, note });
+                if self
+                    .send_message(MidiMessage::NoteOff { channel, note })
+                    .is_ok()
+                {
+                    self.active_notes[channel_index][note_index] = false;
+                } else {
+                    all_notes_sent = false;
+                }
             }
         }
+
+        all_notes_sent
     }
 
     fn send_message(&self, message: MidiMessage) -> Result<(), i32> {
@@ -562,6 +618,9 @@ struct AlsaEventQueue {
     write_index: AtomicUsize,
 }
 
+// Safety: JACK invokes one process callback per client, making this a single
+// producer. The ALSA worker is the sole consumer. The release/acquire index
+// handoff makes initialized slots visible before the consumer reads them.
 unsafe impl Sync for AlsaEventQueue {}
 
 impl AlsaEventQueue {
@@ -677,6 +736,8 @@ impl std::error::Error for AlsaMidiError {}
 mod tests {
     use super::{ALSA_EVENT_QUEUE_CAPACITY, AlsaEventQueue, DrumSound, default_pattern};
     use purewave_engine::{MidiChannel, MidiMessage, MidiNote, MidiVelocity, Track};
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
     fn default_pattern_uses_the_initial_playable_rhythm() {
@@ -727,6 +788,38 @@ mod tests {
         }
 
         assert!(!queue.try_push(note_on(0)));
+    }
+
+    #[test]
+    fn alsa_event_queue_handles_concurrent_wraparound() {
+        const MESSAGE_COUNT: usize = ALSA_EVENT_QUEUE_CAPACITY * 32;
+
+        let queue = Arc::new(AlsaEventQueue::new());
+        let producer_queue = Arc::clone(&queue);
+        let producer = thread::spawn(move || {
+            for index in 0..MESSAGE_COUNT {
+                let message = note_on((index % 128) as u8);
+
+                while !producer_queue.try_push(message) {
+                    thread::yield_now();
+                }
+            }
+        });
+
+        for index in 0..MESSAGE_COUNT {
+            let expected = note_on((index % 128) as u8);
+            let message = loop {
+                if let Some(message) = queue.try_pop() {
+                    break message;
+                }
+
+                thread::yield_now();
+            };
+
+            assert_eq!(message, expected);
+        }
+
+        producer.join().unwrap();
     }
 
     fn track(tracks: &[Track], sound: DrumSound) -> &Track {

@@ -58,6 +58,9 @@ small, documented, and friendly to future standalone and plugin builds.
   and does not provide a sample-accurate timing guarantee.
 - Keep ALSA bridge delivery off the JACK callback. The JACK MIDI path remains
   the sample-accurate standalone output path.
+- Keep ALSA bridge delivery nonblocking so backpressure cannot delay shutdown.
+  If its bounded compatibility queue overflows, request a best-effort active
+  note cleanup rather than dropping a note-off indefinitely.
 - The initial playable seed pattern is Kick on steps 1/5/9/13, Snare and Clap on
   5/13, Hi-hat on every odd-numbered step, and Cymbal on step 1.
 - Keep frontend applications, standalone shells, plugin entry points, and UI

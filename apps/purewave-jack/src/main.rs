@@ -56,7 +56,8 @@ fn run() -> Result<(), JackAppError> {
     client.activate()?;
 
     println!("Purewave JACK MIDI client is running.");
-    println!("Connect purewave:midi_out to your DAW or instrument, then start JACK transport.");
+    println!("Connect purewave:midi_out to your DAW or instrument.");
+    println!("Purewave runs at 120 BPM until a rolling JACK transport takes over.");
     println!("For Bitwig, choose Purewave MIDI as a Generic MIDI Keyboard input.");
     println!("Press Enter to stop.");
 
@@ -174,7 +175,7 @@ struct ProcessState {
     scheduler: Scheduler,
     events: Vec<TimedMidiEvent>,
     alsa_midi: AlsaMidiProducer,
-    fallback_tempo_bpm: f64,
+    standalone_clock: StandaloneClock,
 }
 
 impl ProcessState {
@@ -196,7 +197,7 @@ impl ProcessState {
             scheduler: Scheduler,
             events,
             alsa_midi,
-            fallback_tempo_bpm: DEFAULT_TEMPO_BPM,
+            standalone_clock: StandaloneClock::new(DEFAULT_TEMPO_BPM),
         }
     }
 
@@ -210,7 +211,7 @@ impl ProcessState {
             jack_midi_clear_buffer(midi_buffer);
         }
 
-        let transport = self.transport();
+        let transport = self.transport(frame_count);
         // Frame offsets produced here are sample offsets within this exact JACK block.
         self.scheduler.schedule_midi_block_into_existing_capacity(
             &self.pattern,
@@ -237,28 +238,78 @@ impl ProcessState {
         if buffer.is_null() { None } else { Some(buffer) }
     }
 
-    fn transport(&self) -> Transport {
+    fn transport(&mut self, frame_count: jack_nframes_t) -> Transport {
         let mut position = MaybeUninit::<jack_position_t>::zeroed();
         let state = unsafe { jack_transport_query(self.client, position.as_mut_ptr()) };
         let position = unsafe { position.assume_init() };
         let sample_rate = unsafe { jack_get_sample_rate(self.client) };
-        // JACK may not publish BBT data. In that case keep scheduling against a usable fallback
-        // tempo while still honoring JACK's frame position and rolling/stopped state.
-        let tempo_bpm = if position.valid & JackPositionBBT != 0
-            && position.beats_per_minute.is_finite()
-            && position.beats_per_minute > 0.0
-        {
-            position.beats_per_minute
-        } else {
-            self.fallback_tempo_bpm
-        };
 
-        Transport::new(
-            f64::from(sample_rate),
+        if state == JackTransportRolling {
+            // A rolling JACK transport is the authoritative external timeline. Remember the end
+            // of its current block so a later fallback begins from a sensible musical position.
+            self.standalone_clock
+                .seek_to(u64::from(position.frame).saturating_add(u64::from(frame_count)));
+
+            // JACK may not publish BBT data. In that case use the standalone tempo while still
+            // following JACK's sample position; the standalone fallback remains 120 BPM.
+            let tempo_bpm = if position.valid & JackPositionBBT != 0
+                && position.beats_per_minute.is_finite()
+                && position.beats_per_minute > 0.0
+            {
+                position.beats_per_minute
+            } else {
+                self.standalone_clock.tempo_bpm()
+            };
+
+            Transport::new(
+                f64::from(sample_rate),
+                tempo_bpm,
+                u64::from(position.frame),
+                true,
+            )
+        } else {
+            // JACK does not distinguish an idle server from a stopped external controller. For
+            // this standalone MVP, any non-rolling state means Purewave owns transport and keeps
+            // generating MIDI without relying on a DAW's PipeWire transport implementation.
+            self.standalone_clock
+                .transport_for_next_block(f64::from(sample_rate), frame_count)
+        }
+    }
+}
+
+/// A callback-driven standalone timeline used while no JACK transport is rolling.
+///
+/// It advances by JACK frames instead of wall-clock time, so scheduled offsets still align with
+/// the exact processing block that emits them. The upcoming UI will own play/stop and BPM controls.
+struct StandaloneClock {
+    tempo_bpm: f64,
+    position_samples: u64,
+}
+
+impl StandaloneClock {
+    const fn new(tempo_bpm: f64) -> Self {
+        Self {
             tempo_bpm,
-            u64::from(position.frame),
-            state == JackTransportRolling,
-        )
+            position_samples: 0,
+        }
+    }
+
+    fn tempo_bpm(&self) -> f64 {
+        self.tempo_bpm
+    }
+
+    fn seek_to(&mut self, position_samples: u64) {
+        self.position_samples = position_samples;
+    }
+
+    fn transport_for_next_block(
+        &mut self,
+        sample_rate_hz: f64,
+        frame_count: jack_nframes_t,
+    ) -> Transport {
+        let transport = Transport::new(sample_rate_hz, self.tempo_bpm, self.position_samples, true);
+        self.position_samples = self.position_samples.saturating_add(u64::from(frame_count));
+        transport
     }
 }
 
@@ -607,6 +658,34 @@ impl AlsaRecoveryGate {
 
 fn is_would_block(code: i32) -> bool {
     std::io::Error::from_raw_os_error(-code).kind() == std::io::ErrorKind::WouldBlock
+}
+
+#[cfg(test)]
+mod standalone_clock_tests {
+    use super::StandaloneClock;
+
+    #[test]
+    fn standalone_clock_advances_by_the_previous_block_size() {
+        let mut clock = StandaloneClock::new(120.0);
+
+        let first = clock.transport_for_next_block(48_000.0, 512);
+        let second = clock.transport_for_next_block(48_000.0, 256);
+
+        assert_eq!(first.position_samples, 0);
+        assert_eq!(second.position_samples, 512);
+        assert!(first.playing);
+        assert_eq!(first.tempo_bpm, 120.0);
+    }
+
+    #[test]
+    fn standalone_clock_can_continue_after_jack_transport_stops() {
+        let mut clock = StandaloneClock::new(120.0);
+        clock.seek_to(4_096);
+
+        let transport = clock.transport_for_next_block(48_000.0, 512);
+
+        assert_eq!(transport.position_samples, 4_096);
+    }
 }
 
 struct AlsaSequencerOutput {

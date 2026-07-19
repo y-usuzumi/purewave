@@ -80,6 +80,10 @@ small, documented, and friendly to future standalone and plugin builds.
   constraints, ownership/lifetime invariants, unsafe or raw-API boundaries, and
   recovery behavior; do not narrate self-evident assignments or simple flow.
 - Standalone JACK integration should use JACK transport where practical.
+- The current JACK standalone MVP follows JACK only while it is rolling. In all
+  other JACK states it runs a 120 BPM callback-driven internal clock so native
+  PipeWire DAWs can receive MIDI without acting as JACK transport controllers.
+  A future frontend must expose explicit standalone play/stop and BPM controls.
 - Keep CoreAudio MIDI timing concerns in mind for future macOS support; do not
   assume MIDI scheduling is independent from audio timing on every platform.
 - Treat Raspberry Pi 5 constraints as design inputs for performance-sensitive

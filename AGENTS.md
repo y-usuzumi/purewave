@@ -5,16 +5,6 @@
 Purewave is a Rust step sequencer that may grow into a full DAW. Keep changes
 small, documented, and friendly to future standalone and plugin builds.
 
-## Standing Collaboration Rules
-
-- Make incremental commits as work progresses.
-- Ask the user before amending any commit before `HEAD`.
-- Confirm with the user when unsure about UX or technical direction unless they
-  have explicitly allowed proceeding without confirmation.
-- Spawn a clean agent to cross-check changes before final handoff.
-- Keep `README.md` and `AGENTS.md` updated as requirements and architecture
-  decisions evolve.
-
 ## Product Requirements To Preserve
 
 - Sample-accurate timing is mandatory for both MIDI and audio output.
@@ -74,11 +64,11 @@ small, documented, and friendly to future standalone and plugin builds.
   WASAPI, CoreAudio, VST3, CLAP, and LV2 can evolve independently.
 - Use raw language bindings for audio and plugin APIs; do not introduce
   higher-level third-party audio libraries or engines.
-- Favor readable code over performant-but-hacky code. Optimize only with a clear
-  realtime reason and keep the result understandable.
-- Add useful comments whenever writing code. Explain timing math, realtime
-  constraints, ownership/lifetime invariants, unsafe or raw-API boundaries, and
-  recovery behavior; do not narrate self-evident assignments or simple flow.
+- Optimize realtime paths only with a clear realtime reason and keep the result
+  understandable.
+- For realtime code, comments must explain timing math, realtime constraints,
+  ownership/lifetime invariants, unsafe or raw-API boundaries, and recovery
+  behavior when applicable.
 - Standalone JACK integration should use JACK transport where practical.
 - The current JACK standalone MVP follows JACK only while it is rolling. In all
   other JACK states it runs a 120 BPM callback-driven internal clock so native
@@ -88,4 +78,3 @@ small, documented, and friendly to future standalone and plugin builds.
   assume MIDI scheduling is independent from audio timing on every platform.
 - Treat Raspberry Pi 5 constraints as design inputs for performance-sensitive
   code.
-- Update this file when new requirements change architecture expectations.

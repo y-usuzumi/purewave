@@ -1,9 +1,12 @@
+mod debug_midi;
+
 use alsa_sys::{
     SND_SEQ_ADDRESS_SUBSCRIBERS, SND_SEQ_ADDRESS_UNKNOWN, SND_SEQ_NONBLOCK, SND_SEQ_OPEN_OUTPUT,
     SND_SEQ_QUEUE_DIRECT, snd_midi_event_encode, snd_midi_event_free, snd_midi_event_new,
     snd_midi_event_reset_encode, snd_midi_event_t, snd_seq_close, snd_seq_create_simple_port,
     snd_seq_event_output_direct, snd_seq_event_t, snd_seq_open, snd_seq_set_client_name, snd_seq_t,
 };
+use debug_midi::{DebugMidiEventKind, DebugMidiLogProducer, DebugMidiLogger};
 use jack_sys::{
     JackPortIsOutput, JackPositionBBT, JackTransportRolling, JackUseExactName, RAW_MIDI_TYPE,
     jack_activate, jack_client_close, jack_client_open, jack_client_t, jack_deactivate,
@@ -29,6 +32,7 @@ const MIDI_OUT_PORT: &str = "midi_out";
 const ALSA_CLIENT_NAME: &str = "Purewave MIDI";
 const ALSA_MIDI_OUT_PORT: &str = "midi_out";
 const DEFAULT_TEMPO_BPM: f64 = 120.0;
+const LOG_LEVEL_ENV_VAR: &str = "PUREWAVE_LOG";
 // The scheduler must never expand this buffer from JACK's process callback.
 const MAX_EVENTS_PER_BLOCK: usize = 128;
 // One slot remains empty in the ring buffer to distinguish "full" from "empty".
@@ -51,7 +55,11 @@ fn main() -> ExitCode {
 fn run() -> Result<(), JackAppError> {
     // Bitwig discovers ALSA sequencer clients, while JACK-aware peers consume the direct JACK
     // port. Both receive the engine's same scheduled MIDI messages.
-    let mut alsa_midi = AlsaMidiBridge::open()?;
+    let debug_midi_logging = debug_midi_logging_enabled();
+    // The reporter is always available for bridge errors. The environment flag controls only the
+    // higher-volume per-event diagnostics.
+    let debug_midi_logger = DebugMidiLogger::open().map_err(JackAppError::SpawnDebugLogger)?;
+    let mut alsa_midi = AlsaMidiBridge::open(Some(debug_midi_logger.producer(debug_midi_logging)))?;
     let mut client = JackMidiClient::open(default_pattern(), alsa_midi.producer())?;
     client.activate()?;
 
@@ -64,6 +72,8 @@ fn run() -> Result<(), JackAppError> {
     wait_for_enter();
     client.deactivate();
     alsa_midi.stop();
+    // The debug worker is independent from the ALSA bridge and must not delay app shutdown.
+    drop(debug_midi_logger);
 
     let dropped_events = alsa_midi.dropped_event_count();
     if dropped_events != 0 {
@@ -71,6 +81,14 @@ fn run() -> Result<(), JackAppError> {
     }
 
     Ok(())
+}
+
+fn debug_midi_logging_enabled() -> bool {
+    std::env::var(LOG_LEVEL_ENV_VAR).is_ok_and(|value| is_debug_log_level(&value))
+}
+
+fn is_debug_log_level(value: &str) -> bool {
+    value.eq_ignore_ascii_case("debug")
 }
 
 struct JackMidiClient {
@@ -361,7 +379,7 @@ struct AlsaMidiBridge {
 }
 
 impl AlsaMidiBridge {
-    fn open() -> Result<Self, AlsaMidiError> {
+    fn open(debug_midi_logger: Option<DebugMidiLogProducer>) -> Result<Self, AlsaMidiError> {
         // Construct all shared state before spawning. Startup waits for the worker to create the
         // ALSA port so the app never claims to be ready before Bitwig can discover it.
         let queue = Arc::new(AlsaEventQueue::new());
@@ -383,6 +401,7 @@ impl AlsaMidiBridge {
                     worker_running,
                     worker_note_cleanup_requested,
                     worker_recovery_gate,
+                    debug_midi_logger,
                     ready_sender,
                 )
             })
@@ -468,6 +487,7 @@ fn run_alsa_midi_worker(
     running: Arc<AtomicBool>,
     note_cleanup_requested: Arc<AtomicBool>,
     recovery_gate: Arc<AlsaRecoveryGate>,
+    debug_midi_logger: Option<DebugMidiLogProducer>,
     ready_sender: mpsc::SyncSender<Result<(), AlsaMidiError>>,
 ) {
     // All ALSA initialization and I/O live on this non-realtime thread.
@@ -492,6 +512,7 @@ fn run_alsa_midi_worker(
             &mut reported_output_error,
             &note_cleanup_requested,
             &recovery_gate,
+            &debug_midi_logger,
         ) {
             thread::sleep(Duration::from_millis(1));
         }
@@ -503,12 +524,13 @@ fn run_alsa_midi_worker(
         &mut reported_output_error,
         &note_cleanup_requested,
         &recovery_gate,
+        &debug_midi_logger,
     );
 
     // A disappearing ALSA client can otherwise leave a receiving instrument sustaining a note.
     // The retry limit bounds shutdown if the destination remains unavailable.
     for _ in 0..10 {
-        if output.send_note_off_for_active_notes() {
+        if output.send_note_off_for_active_notes(debug_midi_logger.as_ref()) {
             break;
         }
 
@@ -522,11 +544,18 @@ fn drain_alsa_events(
     reported_output_error: &mut bool,
     note_cleanup_requested: &AtomicBool,
     recovery_gate: &AlsaRecoveryGate,
+    debug_midi_logger: &Option<DebugMidiLogProducer>,
 ) -> bool {
     // Overflow or a nonblocking ALSA backpressure error starts a transactional recovery instead
     // of attempting to preserve a potentially incomplete note-on/note-off sequence.
     if note_cleanup_requested.load(Ordering::Acquire) {
-        return recover_from_alsa_overflow(queue, output, note_cleanup_requested, recovery_gate);
+        return recover_from_alsa_overflow(
+            queue,
+            output,
+            note_cleanup_requested,
+            recovery_gate,
+            debug_midi_logger.as_ref(),
+        );
     }
 
     let mut sent_event = false;
@@ -534,17 +563,36 @@ fn drain_alsa_events(
     while let Some(message) = queue.try_pop() {
         if note_cleanup_requested.load(Ordering::Acquire) {
             return sent_event
-                | recover_from_alsa_overflow(queue, output, note_cleanup_requested, recovery_gate);
+                | recover_from_alsa_overflow(
+                    queue,
+                    output,
+                    note_cleanup_requested,
+                    recovery_gate,
+                    debug_midi_logger.as_ref(),
+                );
         }
 
         sent_event = true;
 
-        if let Err(code) = output.send(message) {
-            if is_would_block(code) {
-                note_cleanup_requested.store(true, Ordering::Release);
-            } else if !*reported_output_error {
-                eprintln!("ALSA MIDI compatibility bridge stopped delivering events: {code}");
-                *reported_output_error = true;
+        match output.send(message) {
+            Ok(()) => {
+                if let Some(debug_midi_logger) = debug_midi_logger {
+                    // The logger uses its own bounded queue, so a slow terminal cannot stall the
+                    // bridge worker after ALSA accepts this event.
+                    debug_midi_logger.log(message, DebugMidiEventKind::Scheduled);
+                }
+            }
+            Err(code) => {
+                if is_would_block(code) {
+                    note_cleanup_requested.store(true, Ordering::Release);
+                } else if !*reported_output_error {
+                    // The diagnostic producer only performs a bounded enqueue; terminal I/O is
+                    // isolated to its dedicated worker so this bridge can always shut down.
+                    if let Some(debug_midi_logger) = debug_midi_logger {
+                        debug_midi_logger.log_alsa_output_error(code);
+                    }
+                    *reported_output_error = true;
+                }
             }
         }
     }
@@ -552,8 +600,13 @@ fn drain_alsa_events(
     // The producer may request cleanup after the last pop but before this loop
     // observes the queue as empty.
     if note_cleanup_requested.load(Ordering::Acquire) {
-        sent_event |=
-            recover_from_alsa_overflow(queue, output, note_cleanup_requested, recovery_gate);
+        sent_event |= recover_from_alsa_overflow(
+            queue,
+            output,
+            note_cleanup_requested,
+            recovery_gate,
+            debug_midi_logger.as_ref(),
+        );
     }
 
     sent_event
@@ -564,6 +617,7 @@ fn recover_from_alsa_overflow(
     output: &mut AlsaSequencerOutput,
     note_cleanup_requested: &AtomicBool,
     recovery_gate: &AlsaRecoveryGate,
+    debug_midi_logger: Option<&DebugMidiLogProducer>,
 ) -> bool {
     // Close admission before flushing. `close_and_wait` proves no callback is still writing a
     // queue slot, so no MIDI event can appear after the flush and before note cleanup.
@@ -573,7 +627,7 @@ fn recover_from_alsa_overflow(
     // sequence could deliver a note-on without its matching note-off.
     while queue.try_pop().is_some() {}
 
-    if output.send_note_off_for_active_notes() {
+    if output.send_note_off_for_active_notes(debug_midi_logger) {
         note_cleanup_requested.store(false, Ordering::Release);
         recovery_gate.open();
         true
@@ -662,7 +716,14 @@ fn is_would_block(code: i32) -> bool {
 
 #[cfg(test)]
 mod standalone_clock_tests {
-    use super::StandaloneClock;
+    use super::{StandaloneClock, is_debug_log_level};
+
+    #[test]
+    fn debug_log_level_is_case_insensitive() {
+        assert!(is_debug_log_level("debug"));
+        assert!(is_debug_log_level("DEBUG"));
+        assert!(!is_debug_log_level("info"));
+    }
 
     #[test]
     fn standalone_clock_advances_by_the_previous_block_size() {
@@ -765,7 +826,10 @@ impl AlsaSequencerOutput {
         Ok(())
     }
 
-    fn send_note_off_for_active_notes(&mut self) -> bool {
+    fn send_note_off_for_active_notes(
+        &mut self,
+        debug_midi_logger: Option<&DebugMidiLogProducer>,
+    ) -> bool {
         // Track successful note-ons locally because the ALSA API has no query for a subscriber's
         // sounding notes. Only those notes need cleanup after an interrupted sequence.
         let mut all_notes_sent = true;
@@ -783,13 +847,22 @@ impl AlsaSequencerOutput {
                     continue;
                 };
 
-                if self
-                    .send_message(MidiMessage::NoteOff { channel, note })
-                    .is_ok()
-                {
-                    self.active_notes[channel_index][note_index] = false;
-                } else {
-                    all_notes_sent = false;
+                let message = MidiMessage::NoteOff { channel, note };
+                match self.send_message(message) {
+                    Ok(()) => {
+                        self.active_notes[channel_index][note_index] = false;
+                        if let Some(debug_midi_logger) = debug_midi_logger {
+                            debug_midi_logger.log(message, DebugMidiEventKind::Cleanup);
+                        }
+                    }
+                    Err(code) => {
+                        if !is_would_block(code)
+                            && let Some(debug_midi_logger) = debug_midi_logger
+                        {
+                            debug_midi_logger.log_alsa_output_error(code);
+                        }
+                        all_notes_sent = false;
+                    }
                 }
             }
         }
@@ -917,6 +990,7 @@ impl AlsaEventQueue {
 #[derive(Debug)]
 enum JackAppError {
     Activate(i32),
+    SpawnDebugLogger(io::Error),
     OpenClient(jack_status_t),
     RegisterPort,
     SetProcessCallback(i32),
@@ -940,6 +1014,9 @@ impl std::fmt::Display for JackAppError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Activate(code) => write!(formatter, "failed to activate JACK client: {code}"),
+            Self::SpawnDebugLogger(error) => {
+                write!(formatter, "failed to start debug MIDI logger: {error}")
+            }
             Self::OpenClient(status) => write!(
                 formatter,
                 "failed to open JACK client; is the JACK server running? status: {status:?}"

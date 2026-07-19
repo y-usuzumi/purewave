@@ -51,6 +51,12 @@ small, documented, and friendly to future standalone and plugin builds.
 - Keep ALSA bridge delivery nonblocking so backpressure cannot delay shutdown.
   If its bounded compatibility queue overflows, suppress bridge events, discard
   the backlog, and request a best-effort active note cleanup before resuming.
+- `PUREWAVE_LOG=debug` may report successful ALSA bridge sends and active-note
+  cleanup messages from its dedicated diagnostic worker. JACK and ALSA bridge
+  workers may enqueue bounded diagnostic records but must never perform terminal
+  I/O. The reporter must reserve the first non-`WouldBlock` ALSA output error
+  from routine diagnostic queue pressure. Do not interpret a successful ALSA
+  send as DAW receipt. Dropped diagnostics must not delay MIDI.
 - The initial playable seed pattern is Kick on steps 1/5/9/13, Snare and Clap on
   5/13, Hi-hat on every odd-numbered step, and Cymbal on step 1.
 - Keep frontend applications, standalone shells, plugin entry points, and UI

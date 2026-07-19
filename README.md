@@ -125,6 +125,22 @@ temporarily discards bridge events and attempts best-effort active-note cleanup
 before resuming. Recovery is not guaranteed while the ALSA destination remains
 unavailable.
 
+Purewave also reserves an isolated diagnostic report for the first non-
+`WouldBlock` ALSA bridge output error, even when per-event debug logging is off.
+
+To confirm that Purewave is forwarding MIDI through the ALSA compatibility
+bridge, enable debug event logging:
+
+```sh
+PUREWAVE_LOG=debug cargo run -p purewave-jack
+```
+
+The terminal may report normal sequenced messages and active-note cleanup with
+channel, note, and MIDI bytes; note-ons also include velocity. ALSA output
+errors report an error code. It runs on a dedicated diagnostic worker: a slow
+terminal can drop debug lines without delaying MIDI. The logs do not confirm
+that Bitwig has consumed an event.
+
 The seeded pattern uses Kick on steps 1/5/9/13, Snare and Clap on 5/13, Hi-hat
 on every odd-numbered step, and Cymbal on step 1.
 

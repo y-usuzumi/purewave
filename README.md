@@ -114,8 +114,9 @@ transport. This ALSA sequencer output exists for DAW compatibility; it is
 delivered from a dedicated app thread and is not sample-accurate. It must not be
 used as the timing reference for future sample-accurate DAW/plugin integration.
 It uses nonblocking delivery; if the compatibility queue overflows, Purewave
-attempts best-effort active-note cleanup. Recovery is not guaranteed while the
-ALSA destination remains unavailable.
+temporarily discards bridge events and attempts best-effort active-note cleanup
+before resuming. Recovery is not guaranteed while the ALSA destination remains
+unavailable.
 
 The seeded pattern uses Kick on steps 1/5/9/13, Snare and Clap on 5/13, Hi-hat
 on every odd-numbered step, and Cymbal on step 1.

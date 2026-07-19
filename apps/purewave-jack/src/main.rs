@@ -290,11 +290,15 @@ impl AlsaMidiBridge {
         let queue = Arc::new(AlsaEventQueue::new());
         let dropped_events = Arc::new(AtomicUsize::new(0));
         let note_cleanup_requested = Arc::new(AtomicBool::new(false));
+        let cleanup_in_progress = Arc::new(AtomicBool::new(false));
+        let active_sends = Arc::new(AtomicUsize::new(0));
         let running = Arc::new(AtomicBool::new(true));
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let worker_queue = Arc::clone(&queue);
         let worker_running = Arc::clone(&running);
         let worker_note_cleanup_requested = Arc::clone(&note_cleanup_requested);
+        let worker_cleanup_in_progress = Arc::clone(&cleanup_in_progress);
+        let worker_active_sends = Arc::clone(&active_sends);
 
         let worker = thread::Builder::new()
             .name("purewave-alsa-midi".to_owned())
@@ -303,6 +307,8 @@ impl AlsaMidiBridge {
                     worker_queue,
                     worker_running,
                     worker_note_cleanup_requested,
+                    worker_cleanup_in_progress,
+                    worker_active_sends,
                     ready_sender,
                 )
             })
@@ -314,6 +320,8 @@ impl AlsaMidiBridge {
                     queue,
                     dropped_events,
                     note_cleanup_requested,
+                    cleanup_in_progress,
+                    active_sends,
                 },
                 running,
                 worker: Some(worker),
@@ -357,14 +365,26 @@ struct AlsaMidiProducer {
     queue: Arc<AlsaEventQueue>,
     dropped_events: Arc<AtomicUsize>,
     note_cleanup_requested: Arc<AtomicBool>,
+    cleanup_in_progress: Arc<AtomicBool>,
+    active_sends: Arc<AtomicUsize>,
 }
 
 impl AlsaMidiProducer {
     fn send(&self, message: MidiMessage) {
+        self.active_sends.fetch_add(1, Ordering::AcqRel);
+
+        if self.cleanup_in_progress.load(Ordering::Acquire) {
+            self.dropped_events.fetch_add(1, Ordering::Relaxed);
+            self.active_sends.fetch_sub(1, Ordering::Release);
+            return;
+        }
+
         if !self.queue.try_push(message) {
             self.dropped_events.fetch_add(1, Ordering::Relaxed);
             self.note_cleanup_requested.store(true, Ordering::Release);
         }
+
+        self.active_sends.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -372,6 +392,8 @@ fn run_alsa_midi_worker(
     queue: Arc<AlsaEventQueue>,
     running: Arc<AtomicBool>,
     note_cleanup_requested: Arc<AtomicBool>,
+    cleanup_in_progress: Arc<AtomicBool>,
+    active_sends: Arc<AtomicUsize>,
     ready_sender: mpsc::SyncSender<Result<(), AlsaMidiError>>,
 ) {
     let mut output = match AlsaSequencerOutput::open() {
@@ -394,6 +416,8 @@ fn run_alsa_midi_worker(
             &mut output,
             &mut reported_output_error,
             &note_cleanup_requested,
+            &cleanup_in_progress,
+            &active_sends,
         ) {
             thread::sleep(Duration::from_millis(1));
         }
@@ -404,6 +428,8 @@ fn run_alsa_midi_worker(
         &mut output,
         &mut reported_output_error,
         &note_cleanup_requested,
+        &cleanup_in_progress,
+        &active_sends,
     );
 
     for _ in 0..10 {
@@ -420,10 +446,33 @@ fn drain_alsa_events(
     output: &mut AlsaSequencerOutput,
     reported_output_error: &mut bool,
     note_cleanup_requested: &AtomicBool,
+    cleanup_in_progress: &AtomicBool,
+    active_sends: &AtomicUsize,
 ) -> bool {
+    if note_cleanup_requested.load(Ordering::Acquire) {
+        return recover_from_alsa_overflow(
+            queue,
+            output,
+            note_cleanup_requested,
+            cleanup_in_progress,
+            active_sends,
+        );
+    }
+
     let mut sent_event = false;
 
     while let Some(message) = queue.try_pop() {
+        if note_cleanup_requested.load(Ordering::Acquire) {
+            return sent_event
+                | recover_from_alsa_overflow(
+                    queue,
+                    output,
+                    note_cleanup_requested,
+                    cleanup_in_progress,
+                    active_sends,
+                );
+        }
+
         sent_event = true;
 
         if let Err(code) = output.send(message) {
@@ -434,30 +483,46 @@ fn drain_alsa_events(
                 *reported_output_error = true;
             }
         }
-
-        sent_event |= clean_active_notes_if_requested(output, note_cleanup_requested);
     }
 
     // The producer may request cleanup after the last pop but before this loop
     // observes the queue as empty.
-    sent_event |= clean_active_notes_if_requested(output, note_cleanup_requested);
+    if note_cleanup_requested.load(Ordering::Acquire) {
+        sent_event |= recover_from_alsa_overflow(
+            queue,
+            output,
+            note_cleanup_requested,
+            cleanup_in_progress,
+            active_sends,
+        );
+    }
 
     sent_event
 }
 
-fn clean_active_notes_if_requested(
+fn recover_from_alsa_overflow(
+    queue: &AlsaEventQueue,
     output: &mut AlsaSequencerOutput,
     note_cleanup_requested: &AtomicBool,
+    cleanup_in_progress: &AtomicBool,
+    active_sends: &AtomicUsize,
 ) -> bool {
-    if !note_cleanup_requested.swap(false, Ordering::AcqRel) {
-        return false;
+    cleanup_in_progress.store(true, Ordering::Release);
+
+    while active_sends.load(Ordering::Acquire) != 0 {
+        thread::yield_now();
     }
 
-    if !output.send_note_off_for_active_notes() {
+    while queue.try_pop().is_some() {}
+
+    if output.send_note_off_for_active_notes() {
+        note_cleanup_requested.store(false, Ordering::Release);
+        cleanup_in_progress.store(false, Ordering::Release);
+        true
+    } else {
         note_cleanup_requested.store(true, Ordering::Release);
+        false
     }
-
-    true
 }
 
 fn is_would_block(code: i32) -> bool {

@@ -290,15 +290,13 @@ impl AlsaMidiBridge {
         let queue = Arc::new(AlsaEventQueue::new());
         let dropped_events = Arc::new(AtomicUsize::new(0));
         let note_cleanup_requested = Arc::new(AtomicBool::new(false));
-        let cleanup_in_progress = Arc::new(AtomicBool::new(false));
-        let active_sends = Arc::new(AtomicUsize::new(0));
+        let recovery_gate = Arc::new(AlsaRecoveryGate::new());
         let running = Arc::new(AtomicBool::new(true));
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let worker_queue = Arc::clone(&queue);
         let worker_running = Arc::clone(&running);
         let worker_note_cleanup_requested = Arc::clone(&note_cleanup_requested);
-        let worker_cleanup_in_progress = Arc::clone(&cleanup_in_progress);
-        let worker_active_sends = Arc::clone(&active_sends);
+        let worker_recovery_gate = Arc::clone(&recovery_gate);
 
         let worker = thread::Builder::new()
             .name("purewave-alsa-midi".to_owned())
@@ -307,8 +305,7 @@ impl AlsaMidiBridge {
                     worker_queue,
                     worker_running,
                     worker_note_cleanup_requested,
-                    worker_cleanup_in_progress,
-                    worker_active_sends,
+                    worker_recovery_gate,
                     ready_sender,
                 )
             })
@@ -320,8 +317,7 @@ impl AlsaMidiBridge {
                     queue,
                     dropped_events,
                     note_cleanup_requested,
-                    cleanup_in_progress,
-                    active_sends,
+                    recovery_gate,
                 },
                 running,
                 worker: Some(worker),
@@ -365,17 +361,13 @@ struct AlsaMidiProducer {
     queue: Arc<AlsaEventQueue>,
     dropped_events: Arc<AtomicUsize>,
     note_cleanup_requested: Arc<AtomicBool>,
-    cleanup_in_progress: Arc<AtomicBool>,
-    active_sends: Arc<AtomicUsize>,
+    recovery_gate: Arc<AlsaRecoveryGate>,
 }
 
 impl AlsaMidiProducer {
     fn send(&self, message: MidiMessage) {
-        self.active_sends.fetch_add(1, Ordering::AcqRel);
-
-        if self.cleanup_in_progress.load(Ordering::Acquire) {
+        if !self.recovery_gate.try_enter() {
             self.dropped_events.fetch_add(1, Ordering::Relaxed);
-            self.active_sends.fetch_sub(1, Ordering::Release);
             return;
         }
 
@@ -384,7 +376,7 @@ impl AlsaMidiProducer {
             self.note_cleanup_requested.store(true, Ordering::Release);
         }
 
-        self.active_sends.fetch_sub(1, Ordering::Release);
+        self.recovery_gate.leave();
     }
 }
 
@@ -392,8 +384,7 @@ fn run_alsa_midi_worker(
     queue: Arc<AlsaEventQueue>,
     running: Arc<AtomicBool>,
     note_cleanup_requested: Arc<AtomicBool>,
-    cleanup_in_progress: Arc<AtomicBool>,
-    active_sends: Arc<AtomicUsize>,
+    recovery_gate: Arc<AlsaRecoveryGate>,
     ready_sender: mpsc::SyncSender<Result<(), AlsaMidiError>>,
 ) {
     let mut output = match AlsaSequencerOutput::open() {
@@ -416,8 +407,7 @@ fn run_alsa_midi_worker(
             &mut output,
             &mut reported_output_error,
             &note_cleanup_requested,
-            &cleanup_in_progress,
-            &active_sends,
+            &recovery_gate,
         ) {
             thread::sleep(Duration::from_millis(1));
         }
@@ -428,8 +418,7 @@ fn run_alsa_midi_worker(
         &mut output,
         &mut reported_output_error,
         &note_cleanup_requested,
-        &cleanup_in_progress,
-        &active_sends,
+        &recovery_gate,
     );
 
     for _ in 0..10 {
@@ -446,17 +435,10 @@ fn drain_alsa_events(
     output: &mut AlsaSequencerOutput,
     reported_output_error: &mut bool,
     note_cleanup_requested: &AtomicBool,
-    cleanup_in_progress: &AtomicBool,
-    active_sends: &AtomicUsize,
+    recovery_gate: &AlsaRecoveryGate,
 ) -> bool {
     if note_cleanup_requested.load(Ordering::Acquire) {
-        return recover_from_alsa_overflow(
-            queue,
-            output,
-            note_cleanup_requested,
-            cleanup_in_progress,
-            active_sends,
-        );
+        return recover_from_alsa_overflow(queue, output, note_cleanup_requested, recovery_gate);
     }
 
     let mut sent_event = false;
@@ -464,13 +446,7 @@ fn drain_alsa_events(
     while let Some(message) = queue.try_pop() {
         if note_cleanup_requested.load(Ordering::Acquire) {
             return sent_event
-                | recover_from_alsa_overflow(
-                    queue,
-                    output,
-                    note_cleanup_requested,
-                    cleanup_in_progress,
-                    active_sends,
-                );
+                | recover_from_alsa_overflow(queue, output, note_cleanup_requested, recovery_gate);
         }
 
         sent_event = true;
@@ -488,13 +464,8 @@ fn drain_alsa_events(
     // The producer may request cleanup after the last pop but before this loop
     // observes the queue as empty.
     if note_cleanup_requested.load(Ordering::Acquire) {
-        sent_event |= recover_from_alsa_overflow(
-            queue,
-            output,
-            note_cleanup_requested,
-            cleanup_in_progress,
-            active_sends,
-        );
+        sent_event |=
+            recover_from_alsa_overflow(queue, output, note_cleanup_requested, recovery_gate);
     }
 
     sent_event
@@ -504,24 +475,92 @@ fn recover_from_alsa_overflow(
     queue: &AlsaEventQueue,
     output: &mut AlsaSequencerOutput,
     note_cleanup_requested: &AtomicBool,
-    cleanup_in_progress: &AtomicBool,
-    active_sends: &AtomicUsize,
+    recovery_gate: &AlsaRecoveryGate,
 ) -> bool {
-    cleanup_in_progress.store(true, Ordering::Release);
-
-    while active_sends.load(Ordering::Acquire) != 0 {
-        thread::yield_now();
-    }
+    recovery_gate.close_and_wait();
 
     while queue.try_pop().is_some() {}
 
     if output.send_note_off_for_active_notes() {
         note_cleanup_requested.store(false, Ordering::Release);
-        cleanup_in_progress.store(false, Ordering::Release);
+        recovery_gate.open();
         true
     } else {
         note_cleanup_requested.store(true, Ordering::Release);
         false
+    }
+}
+
+struct AlsaRecoveryGate {
+    // Bit zero closes admission. Every active producer increments by two, so
+    // closing the gate and observing active producers use the same atomic state.
+    state: AtomicUsize,
+}
+
+impl AlsaRecoveryGate {
+    const CLOSED: usize = 1;
+    const PRODUCER_UNIT: usize = 2;
+
+    fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+        }
+    }
+
+    fn try_enter(&self) -> bool {
+        let mut state = self.state.load(Ordering::Acquire);
+
+        loop {
+            if state & Self::CLOSED != 0 {
+                return false;
+            }
+
+            match self.state.compare_exchange_weak(
+                state,
+                state + Self::PRODUCER_UNIT,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(updated_state) => state = updated_state,
+            }
+        }
+    }
+
+    fn leave(&self) {
+        self.state.fetch_sub(Self::PRODUCER_UNIT, Ordering::Release);
+    }
+
+    fn close_and_wait(&self) {
+        let mut state = self.state.load(Ordering::Acquire);
+
+        loop {
+            if state & Self::CLOSED == 0 {
+                match self.state.compare_exchange_weak(
+                    state,
+                    state | Self::CLOSED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(closed_state) => state = closed_state | Self::CLOSED,
+                    Err(updated_state) => {
+                        state = updated_state;
+                        continue;
+                    }
+                }
+            }
+
+            if state == Self::CLOSED {
+                return;
+            }
+
+            thread::yield_now();
+            state = self.state.load(Ordering::Acquire);
+        }
+    }
+
+    fn open(&self) {
+        self.state.fetch_and(!Self::CLOSED, Ordering::Release);
     }
 }
 
@@ -812,7 +851,9 @@ impl std::error::Error for AlsaMidiError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ALSA_EVENT_QUEUE_CAPACITY, AlsaEventQueue, DrumSound, default_pattern};
+    use super::{
+        ALSA_EVENT_QUEUE_CAPACITY, AlsaEventQueue, AlsaRecoveryGate, DrumSound, default_pattern,
+    };
     use purewave_engine::{MidiChannel, MidiMessage, MidiNote, MidiVelocity, Track};
     use std::sync::Arc;
     use std::thread;
@@ -898,6 +939,21 @@ mod tests {
         }
 
         producer.join().unwrap();
+    }
+
+    #[test]
+    fn alsa_recovery_gate_blocks_new_producers_until_reopened() {
+        let gate = AlsaRecoveryGate::new();
+
+        assert!(gate.try_enter());
+        gate.leave();
+        gate.close_and_wait();
+
+        assert!(!gate.try_enter());
+
+        gate.open();
+        assert!(gate.try_enter());
+        gate.leave();
     }
 
     fn track(tracks: &[Track], sound: DrumSound) -> &Track {

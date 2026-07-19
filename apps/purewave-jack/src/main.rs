@@ -421,7 +421,7 @@ fn drain_alsa_events(
     reported_output_error: &mut bool,
     note_cleanup_requested: &AtomicBool,
 ) -> bool {
-    let mut sent_event = false;
+    let mut sent_event = clean_active_notes_if_requested(output, note_cleanup_requested);
 
     while let Some(message) = queue.try_pop() {
         sent_event = true;
@@ -434,17 +434,26 @@ fn drain_alsa_events(
                 *reported_output_error = true;
             }
         }
-    }
 
-    if note_cleanup_requested.swap(false, Ordering::AcqRel) {
-        sent_event = true;
-
-        if !output.send_note_off_for_active_notes() {
-            note_cleanup_requested.store(true, Ordering::Release);
-        }
+        sent_event |= clean_active_notes_if_requested(output, note_cleanup_requested);
     }
 
     sent_event
+}
+
+fn clean_active_notes_if_requested(
+    output: &mut AlsaSequencerOutput,
+    note_cleanup_requested: &AtomicBool,
+) -> bool {
+    if !note_cleanup_requested.swap(false, Ordering::AcqRel) {
+        return false;
+    }
+
+    if !output.send_note_off_for_active_notes() {
+        note_cleanup_requested.store(true, Ordering::Release);
+    }
+
+    true
 }
 
 fn is_would_block(code: i32) -> bool {

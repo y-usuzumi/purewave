@@ -94,7 +94,7 @@ cargo run -p purewave-cli
 Expected output:
 
 ```text
-Purewave engine ready: 6 tracks, 16 steps
+Purewave engine ready: 7 tracks, 16 steps
 ```
 
 The temporary CLI does not create a JACK client, open MIDI ports, emit MIDI to an
@@ -141,8 +141,9 @@ errors report an error code. It runs on a dedicated diagnostic worker: a slow
 terminal can drop debug lines without delaying MIDI. The logs do not confirm
 that Bitwig has consumed an event.
 
-The seeded pattern uses Kick on steps 1/5/9/13, Snare and Clap on 5/13, Hi-hat
-on every odd-numbered step, and Cymbal on step 1.
+The seeded pattern uses Kick on steps 1/5/9/13, Snare and Clap on 5/13, HH
+Closed on every odd-numbered step, and Cymbal on step 1. The HH Open track
+starts empty.
 
 If JACK is not running, the app exits with a message asking whether the JACK
 server is running.
@@ -153,25 +154,27 @@ The first implementation target is a Linux JACK standalone application, with
 Raspberry Pi 5 support coming next. The standalone frontend should use Tauri
 with Solid and call into the engine in-process.
 
-The MVP sequencer is a 16-step, one-bar, 4/4 grid. It starts with six tracks:
+The MVP sequencer is a 16-step, one-bar, 4/4 grid. It starts with seven tracks:
 
 - Tom.
 - Kick.
 - Snare.
-- Hi-hat.
+- HH Closed.
+- HH Open.
 - Cymbal.
 - Clap.
 
 The MVP emits MIDI only to an external destination. All tracks may initially use
 the same MIDI channel, with different MIDI note numbers per sound. The default
-mapping should follow General MIDI drum conventions where practical:
+mapping uses Bitwig's note labels, where `C1` is MIDI note 36:
 
-- Kick: note 36.
-- Snare: note 38.
-- Clap: note 39.
-- Hi-hat: note 42.
-- Tom: note 45.
-- Cymbal: note 49.
+- Tom: A#1 (note 46).
+- Kick: C1 (note 36).
+- Snare: C#1 (note 37).
+- HH Closed: D1 (note 38).
+- HH Open: D#1 (note 39).
+- Cymbal: G1 (note 43).
+- Clap: C#2 (note 49).
 
 Each step stores whether it is enabled, plus note, velocity, and gate length.
 Standalone mode should provide internal BPM, play/stop, and loop length controls.

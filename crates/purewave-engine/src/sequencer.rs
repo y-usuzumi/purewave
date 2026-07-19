@@ -11,7 +11,8 @@ pub enum DrumSound {
     Tom,
     Kick,
     Snare,
-    HiHat,
+    HiHatClosed,
+    HiHatOpen,
     Cymbal,
     Clap,
 }
@@ -22,21 +23,24 @@ impl DrumSound {
             Self::Tom => "Tom",
             Self::Kick => "Kick",
             Self::Snare => "Snare",
-            Self::HiHat => "Hi-hat",
+            Self::HiHatClosed => "HH Closed",
+            Self::HiHatOpen => "HH Open",
             Self::Cymbal => "Cymbal",
             Self::Clap => "Clap",
         }
     }
 
     pub const fn default_note(self) -> MidiNote {
-        // General MIDI percussion convention: these notes share channel 10 in the MVP.
+        // These are the user's requested Bitwig note labels. In Bitwig's convention, C1 is
+        // MIDI note 36, so the engine stores the corresponding raw MIDI note numbers here.
         match self {
-            Self::Tom => MidiNote::new(45).unwrap(),
+            Self::Tom => MidiNote::new(46).unwrap(),
             Self::Kick => MidiNote::new(36).unwrap(),
-            Self::Snare => MidiNote::new(38).unwrap(),
-            Self::HiHat => MidiNote::new(42).unwrap(),
-            Self::Cymbal => MidiNote::new(49).unwrap(),
-            Self::Clap => MidiNote::new(39).unwrap(),
+            Self::Snare => MidiNote::new(37).unwrap(),
+            Self::HiHatClosed => MidiNote::new(38).unwrap(),
+            Self::HiHatOpen => MidiNote::new(39).unwrap(),
+            Self::Cymbal => MidiNote::new(43).unwrap(),
+            Self::Clap => MidiNote::new(49).unwrap(),
         }
     }
 }
@@ -144,7 +148,8 @@ impl Pattern {
             DrumSound::Tom,
             DrumSound::Kick,
             DrumSound::Snare,
-            DrumSound::HiHat,
+            DrumSound::HiHatClosed,
+            DrumSound::HiHatOpen,
             DrumSound::Cymbal,
             DrumSound::Clap,
         ];
@@ -187,12 +192,13 @@ mod tests {
         assert_eq!(
             sounds_and_notes,
             vec![
-                (DrumSound::Tom, 45, 10),
+                (DrumSound::Tom, 46, 10),
                 (DrumSound::Kick, 36, 10),
-                (DrumSound::Snare, 38, 10),
-                (DrumSound::HiHat, 42, 10),
-                (DrumSound::Cymbal, 49, 10),
-                (DrumSound::Clap, 39, 10),
+                (DrumSound::Snare, 37, 10),
+                (DrumSound::HiHatClosed, 38, 10),
+                (DrumSound::HiHatOpen, 39, 10),
+                (DrumSound::Cymbal, 43, 10),
+                (DrumSound::Clap, 49, 10),
             ]
         );
         assert_eq!(pattern.step_count(), 16);

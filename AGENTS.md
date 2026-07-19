@@ -22,10 +22,12 @@ small, documented, and friendly to future standalone and plugin builds.
 - The MVP targets Linux JACK first, with Raspberry Pi 5 coming next.
 - The MVP standalone frontend should use Tauri with Solid.
 - The MVP sequencer is a 16-step, one-bar, 4/4 MIDI grid with Tom, Kick, Snare,
-  Hi-hat, Cymbal, and Clap tracks.
+  HH Closed, HH Open, Cymbal, and Clap tracks.
 - The MVP emits MIDI only to an external destination.
-- All MVP tracks may initially share one MIDI channel, using distinct General
-  MIDI drum notes where practical.
+- All MVP tracks may initially share one MIDI channel. Their default notes use
+  Bitwig labels, where C1 is MIDI note 36: Tom A#1 (46), Kick C1 (36), Snare
+  C#1 (37), HH Closed D1 (38), HH Open D#1 (39), Cymbal G1 (43), and Clap C#2
+  (49).
 - MVP steps store enabled state, note, velocity, and gate length.
 - Standalone mode owns internal BPM, play/stop, and loop length controls.
 - Plugin mode respects host tempo and transport.
@@ -58,7 +60,8 @@ small, documented, and friendly to future standalone and plugin builds.
   from routine diagnostic queue pressure. Do not interpret a successful ALSA
   send as DAW receipt. Dropped diagnostics must not delay MIDI.
 - The initial playable seed pattern is Kick on steps 1/5/9/13, Snare and Clap on
-  5/13, Hi-hat on every odd-numbered step, and Cymbal on step 1.
+  5/13, HH Closed on every odd-numbered step, and Cymbal on step 1. HH Open
+  starts empty.
 - Keep frontend applications, standalone shells, plugin entry points, and UI
   workflows in the app layer. Keep sequencing, timing, transport, MIDI/audio
   rendering, and backend-facing realtime contracts in the engine layer.

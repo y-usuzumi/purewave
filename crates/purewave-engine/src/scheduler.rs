@@ -285,6 +285,7 @@ mod tests {
     #[test]
     fn scheduler_wraps_pattern_at_loop_boundary() {
         let mut pattern = Pattern::default_drum_grid();
+        let clap_note = DrumSound::Clap.default_note().get();
         let clap = pattern
             .tracks
             .iter_mut()
@@ -298,9 +299,9 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].frame_offset, 0);
-        assert_eq!(events[0].message.bytes(), [0x99, 39, 100]);
+        assert_eq!(events[0].message.bytes(), [0x99, clap_note, 100]);
         assert_eq!(events[1].frame_offset, 3_000);
-        assert_eq!(events[1].message, note_off(39));
+        assert_eq!(events[1].message, note_off(clap_note));
     }
 
     #[test]
@@ -372,6 +373,8 @@ mod tests {
         for track in &mut pattern.tracks {
             track.enable_step(0);
         }
+        // Every enabled track emits a note-on and note-off within this two-step block.
+        let expected_event_count = pattern.tracks.len() * 2;
         let transport = Transport::new(48_000.0, 120.0, 0, true);
         let mut events = Vec::with_capacity(4);
         let initial_capacity = events.capacity();
@@ -385,7 +388,7 @@ mod tests {
 
         assert_eq!(events.capacity(), initial_capacity);
         assert_eq!(events.len(), initial_capacity);
-        assert_eq!(dropped.0, 8);
+        assert_eq!(dropped.0, expected_event_count - initial_capacity);
     }
 
     fn note_off(note: u8) -> MidiMessage {

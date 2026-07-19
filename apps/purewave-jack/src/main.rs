@@ -346,11 +346,16 @@ unsafe extern "C" fn process_callback(frame_count: jack_nframes_t, arg: *mut c_v
 fn default_pattern() -> Pattern {
     let mut pattern = Pattern::default_drum_grid();
 
-    // A small fixed rhythm makes the standalone app audible before the UI exists.
+    // A small fixed rhythm makes the standalone app audible before the UI exists. The open-hat
+    // lane intentionally remains empty so the new track starts as a blank editing surface.
     enable_steps(&mut pattern, DrumSound::Kick, &[0, 4, 8, 12]);
     enable_steps(&mut pattern, DrumSound::Snare, &[4, 12]);
     enable_steps(&mut pattern, DrumSound::Clap, &[4, 12]);
-    enable_steps(&mut pattern, DrumSound::HiHat, &[0, 2, 4, 6, 8, 10, 12, 14]);
+    enable_steps(
+        &mut pattern,
+        DrumSound::HiHatClosed,
+        &[0, 2, 4, 6, 8, 10, 12, 14],
+    );
     enable_steps(&mut pattern, DrumSound::Cymbal, &[0]);
 
     pattern
@@ -1086,9 +1091,10 @@ mod tests {
             vec![4, 12]
         );
         assert_eq!(
-            enabled_steps(track(&pattern.tracks, DrumSound::HiHat)),
+            enabled_steps(track(&pattern.tracks, DrumSound::HiHatClosed)),
             vec![0, 2, 4, 6, 8, 10, 12, 14]
         );
+        assert!(enabled_steps(track(&pattern.tracks, DrumSound::HiHatOpen)).is_empty());
         assert_eq!(
             enabled_steps(track(&pattern.tracks, DrumSound::Cymbal)),
             vec![0]

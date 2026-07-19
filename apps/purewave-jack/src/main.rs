@@ -421,7 +421,7 @@ fn drain_alsa_events(
     reported_output_error: &mut bool,
     note_cleanup_requested: &AtomicBool,
 ) -> bool {
-    let mut sent_event = clean_active_notes_if_requested(output, note_cleanup_requested);
+    let mut sent_event = false;
 
     while let Some(message) = queue.try_pop() {
         sent_event = true;
@@ -437,6 +437,10 @@ fn drain_alsa_events(
 
         sent_event |= clean_active_notes_if_requested(output, note_cleanup_requested);
     }
+
+    // The producer may request cleanup after the last pop but before this loop
+    // observes the queue as empty.
+    sent_event |= clean_active_notes_if_requested(output, note_cleanup_requested);
 
     sent_event
 }

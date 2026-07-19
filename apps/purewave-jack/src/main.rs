@@ -29,9 +29,13 @@ const MIDI_OUT_PORT: &str = "midi_out";
 const ALSA_CLIENT_NAME: &str = "Purewave MIDI";
 const ALSA_MIDI_OUT_PORT: &str = "midi_out";
 const DEFAULT_TEMPO_BPM: f64 = 120.0;
+// The scheduler must never expand this buffer from JACK's process callback.
 const MAX_EVENTS_PER_BLOCK: usize = 128;
+// One slot remains empty in the ring buffer to distinguish "full" from "empty".
 const ALSA_EVENT_QUEUE_CAPACITY: usize = 512;
+// ALSA source-port capabilities: another client may subscribe and read MIDI from it.
 const ALSA_PORT_CAPABILITIES: u32 = (1 << 0) | (1 << 5);
+// Mark the virtual port as a MIDI-capable software application endpoint.
 const ALSA_PORT_TYPE: u32 = (1 << 1) | (1 << 17) | (1 << 20);
 
 fn main() -> ExitCode {
@@ -45,6 +49,8 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), JackAppError> {
+    // Bitwig discovers ALSA sequencer clients, while JACK-aware peers consume the direct JACK
+    // port. Both receive the engine's same scheduled MIDI messages.
     let mut alsa_midi = AlsaMidiBridge::open()?;
     let mut client = JackMidiClient::open(default_pattern(), alsa_midi.producer())?;
     client.activate()?;
@@ -67,6 +73,8 @@ fn run() -> Result<(), JackAppError> {
 }
 
 struct JackMidiClient {
+    // JACK owns these raw handles. `_state` stays boxed at a stable address because JACK stores
+    // its pointer as the process callback's user data.
     client: *mut jack_client_t,
     _state: Box<ProcessState>,
     active: bool,
@@ -79,6 +87,7 @@ impl JackMidiClient {
         let midi_type = CString::new(RAW_MIDI_TYPE)?;
         let mut status = MaybeUninit::<jack_status_t>::zeroed();
 
+        // Exact naming makes the documented port name deterministic: `purewave:midi_out`.
         let client = unsafe {
             jack_client_open(client_name.as_ptr(), JackUseExactName, status.as_mut_ptr())
         };
@@ -88,6 +97,7 @@ impl JackMidiClient {
             return Err(JackAppError::OpenClient(status));
         }
 
+        // JACK MIDI uses a port buffer owned by JACK for each audio processing block.
         let midi_out = unsafe {
             jack_port_register(
                 client,
@@ -106,6 +116,7 @@ impl JackMidiClient {
         }
 
         let mut state = Box::new(ProcessState::new(client, midi_out, pattern, alsa_midi));
+        // `state` is retained in the client for the callback's entire lifetime.
         let callback_arg = (&mut *state) as *mut ProcessState as *mut c_void;
         let callback_result =
             unsafe { jack_set_process_callback(client, Some(process_callback), callback_arg) };
@@ -156,6 +167,7 @@ impl Drop for JackMidiClient {
 }
 
 struct ProcessState {
+    // Everything in this structure is touched on JACK's realtime process thread.
     client: *mut jack_client_t,
     midi_out: *mut jack_port_t,
     pattern: Pattern,
@@ -172,6 +184,8 @@ impl ProcessState {
         pattern: Pattern,
         alsa_midi: AlsaMidiProducer,
     ) -> Self {
+        // Allocate once before activation. The callback uses the scheduler's bounded API so this
+        // vector cannot grow while JACK is processing audio.
         let mut events = Vec::with_capacity(MAX_EVENTS_PER_BLOCK);
         events.reserve_exact(MAX_EVENTS_PER_BLOCK.saturating_sub(events.capacity()));
 
@@ -191,11 +205,13 @@ impl ProcessState {
             return;
         };
 
+        // Each callback owns a fresh JACK MIDI buffer; clear stale events before writing ours.
         unsafe {
             jack_midi_clear_buffer(midi_buffer);
         }
 
         let transport = self.transport();
+        // Frame offsets produced here are sample offsets within this exact JACK block.
         self.scheduler.schedule_midi_block_into_existing_capacity(
             &self.pattern,
             transport,
@@ -209,6 +225,8 @@ impl ProcessState {
                 jack_midi_event_write(midi_buffer, event.frame_offset, bytes.as_ptr(), bytes.len());
             }
 
+            // The ALSA route is intentionally only an enqueue. It never calls ALSA or blocks on
+            // the JACK thread, and therefore is not the sample-accurate output path.
             self.alsa_midi.send(event.message);
         }
     }
@@ -224,6 +242,8 @@ impl ProcessState {
         let state = unsafe { jack_transport_query(self.client, position.as_mut_ptr()) };
         let position = unsafe { position.assume_init() };
         let sample_rate = unsafe { jack_get_sample_rate(self.client) };
+        // JACK may not publish BBT data. In that case keep scheduling against a usable fallback
+        // tempo while still honoring JACK's frame position and rolling/stopped state.
         let tempo_bpm = if position.valid & JackPositionBBT != 0
             && position.beats_per_minute.is_finite()
             && position.beats_per_minute > 0.0
@@ -247,6 +267,8 @@ unsafe extern "C" fn process_callback(frame_count: jack_nframes_t, arg: *mut c_v
         return 0;
     }
 
+    // `JackMidiClient::open` installed this pointer from its owned boxed ProcessState and keeps
+    // it alive until after JACK has been deactivated.
     let state = unsafe { &mut *(arg as *mut ProcessState) };
     state.process(frame_count);
     0
@@ -255,6 +277,7 @@ unsafe extern "C" fn process_callback(frame_count: jack_nframes_t, arg: *mut c_v
 fn default_pattern() -> Pattern {
     let mut pattern = Pattern::default_drum_grid();
 
+    // A small fixed rhythm makes the standalone app audible before the UI exists.
     enable_steps(&mut pattern, DrumSound::Kick, &[0, 4, 8, 12]);
     enable_steps(&mut pattern, DrumSound::Snare, &[4, 12]);
     enable_steps(&mut pattern, DrumSound::Clap, &[4, 12]);
@@ -280,6 +303,7 @@ fn wait_for_enter() {
 }
 
 struct AlsaMidiBridge {
+    // The producer is shared with the JACK callback; the worker exclusively owns ALSA handles.
     producer: AlsaMidiProducer,
     running: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -287,6 +311,8 @@ struct AlsaMidiBridge {
 
 impl AlsaMidiBridge {
     fn open() -> Result<Self, AlsaMidiError> {
+        // Construct all shared state before spawning. Startup waits for the worker to create the
+        // ALSA port so the app never claims to be ready before Bitwig can discover it.
         let queue = Arc::new(AlsaEventQueue::new());
         let dropped_events = Arc::new(AtomicUsize::new(0));
         let note_cleanup_requested = Arc::new(AtomicBool::new(false));
@@ -342,6 +368,8 @@ impl AlsaMidiBridge {
     }
 
     fn stop(&mut self) {
+        // Join outside the JACK callback, after deactivation, so the worker can safely finish its
+        // best-effort note cleanup without delaying audio processing.
         self.running.store(false, Ordering::Release);
 
         if let Some(worker) = self.worker.take() {
@@ -358,6 +386,8 @@ impl Drop for AlsaMidiBridge {
 
 #[derive(Clone)]
 struct AlsaMidiProducer {
+    // This is the callback-facing half of the compatibility bridge. Its only work is bounded
+    // atomic bookkeeping and an SPSC enqueue.
     queue: Arc<AlsaEventQueue>,
     dropped_events: Arc<AtomicUsize>,
     note_cleanup_requested: Arc<AtomicBool>,
@@ -366,6 +396,8 @@ struct AlsaMidiProducer {
 
 impl AlsaMidiProducer {
     fn send(&self, message: MidiMessage) {
+        // During overflow recovery, dropping compatibility events is safer than letting a queued
+        // note-on slip past the all-note-off cleanup. JACK output is still emitted above.
         if !self.recovery_gate.try_enter() {
             self.dropped_events.fetch_add(1, Ordering::Relaxed);
             return;
@@ -387,6 +419,7 @@ fn run_alsa_midi_worker(
     recovery_gate: Arc<AlsaRecoveryGate>,
     ready_sender: mpsc::SyncSender<Result<(), AlsaMidiError>>,
 ) {
+    // All ALSA initialization and I/O live on this non-realtime thread.
     let mut output = match AlsaSequencerOutput::open() {
         Ok(output) => output,
         Err(error) => {
@@ -421,6 +454,8 @@ fn run_alsa_midi_worker(
         &recovery_gate,
     );
 
+    // A disappearing ALSA client can otherwise leave a receiving instrument sustaining a note.
+    // The retry limit bounds shutdown if the destination remains unavailable.
     for _ in 0..10 {
         if output.send_note_off_for_active_notes() {
             break;
@@ -437,6 +472,8 @@ fn drain_alsa_events(
     note_cleanup_requested: &AtomicBool,
     recovery_gate: &AlsaRecoveryGate,
 ) -> bool {
+    // Overflow or a nonblocking ALSA backpressure error starts a transactional recovery instead
+    // of attempting to preserve a potentially incomplete note-on/note-off sequence.
     if note_cleanup_requested.load(Ordering::Acquire) {
         return recover_from_alsa_overflow(queue, output, note_cleanup_requested, recovery_gate);
     }
@@ -477,8 +514,12 @@ fn recover_from_alsa_overflow(
     note_cleanup_requested: &AtomicBool,
     recovery_gate: &AlsaRecoveryGate,
 ) -> bool {
+    // Close admission before flushing. `close_and_wait` proves no callback is still writing a
+    // queue slot, so no MIDI event can appear after the flush and before note cleanup.
     recovery_gate.close_and_wait();
 
+    // The queue is intentionally abandoned as a unit: replaying only part of an overloaded MIDI
+    // sequence could deliver a note-on without its matching note-off.
     while queue.try_pop().is_some() {}
 
     if output.send_note_off_for_active_notes() {
@@ -569,6 +610,7 @@ fn is_would_block(code: i32) -> bool {
 }
 
 struct AlsaSequencerOutput {
+    // These raw ALSA handles are confined to the worker thread after construction.
     sequencer: *mut snd_seq_t,
     encoder: *mut snd_midi_event_t,
     port: u8,
@@ -584,6 +626,8 @@ impl AlsaSequencerOutput {
         let port_name = CString::new(ALSA_MIDI_OUT_PORT).expect("ALSA port name contains no nulls");
         let mut sequencer = std::ptr::null_mut();
 
+        // Nonblocking mode means a slow ALSA destination returns EAGAIN instead of stalling
+        // shutdown or the compatibility worker indefinitely.
         let open_result = unsafe {
             snd_seq_open(
                 &mut sequencer,
@@ -643,6 +687,8 @@ impl AlsaSequencerOutput {
     }
 
     fn send_note_off_for_active_notes(&mut self) -> bool {
+        // Track successful note-ons locally because the ALSA API has no query for a subscriber's
+        // sounding notes. Only those notes need cleanup after an interrupted sequence.
         let mut all_notes_sent = true;
 
         for channel_index in 0..self.active_notes.len() {
@@ -676,6 +722,8 @@ impl AlsaSequencerOutput {
         let bytes = message.bytes();
         let mut event = MaybeUninit::<snd_seq_event_t>::zeroed();
 
+        // ALSA's MIDI encoder translates the three raw MIDI bytes into its sequencer event
+        // struct, avoiding hand-written union initialization.
         unsafe {
             snd_midi_event_reset_encode(self.encoder);
             let encoded = snd_midi_event_encode(
@@ -690,6 +738,7 @@ impl AlsaSequencerOutput {
 
             let event = &mut *event.as_mut_ptr();
             event.source.port = self.port;
+            // Subscribers (for example Bitwig's virtual MIDI input) receive this direct event.
             event.dest.client = SND_SEQ_ADDRESS_SUBSCRIBERS;
             event.dest.port = SND_SEQ_ADDRESS_UNKNOWN;
             event.queue = SND_SEQ_QUEUE_DIRECT;
@@ -730,6 +779,8 @@ impl Drop for AlsaSequencerOutput {
 }
 
 struct AlsaEventQueue {
+    // Fixed slots keep the callback allocation-free. UnsafeCell is required because producer and
+    // consumer write distinct slots without a mutex.
     slots: Box<[std::cell::UnsafeCell<MaybeUninit<MidiMessage>>; ALSA_EVENT_QUEUE_CAPACITY]>,
     read_index: AtomicUsize,
     write_index: AtomicUsize,
@@ -759,6 +810,8 @@ impl AlsaEventQueue {
             return false;
         }
 
+        // The producer owns `write_index`; the release store below publishes this initialized
+        // slot to the consumer.
         unsafe {
             (*self.slots[write_index].get()).write(message);
         }
@@ -773,6 +826,8 @@ impl AlsaEventQueue {
             return None;
         }
 
+        // The acquire load above pairs with the producer's release store, so this slot has been
+        // initialized before it is read. The consumer exclusively owns `read_index`.
         let message = unsafe { (*self.slots[read_index].get()).assume_init_read() };
         let next_read_index = (read_index + 1) % ALSA_EVENT_QUEUE_CAPACITY;
         self.read_index.store(next_read_index, Ordering::Release);

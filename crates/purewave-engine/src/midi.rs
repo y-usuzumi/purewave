@@ -1,3 +1,7 @@
+/// A user-facing MIDI channel number in the conventional one-based range 1 through 16.
+///
+/// MIDI status bytes encode that same channel in the zero-based low nibble, which is handled by
+/// `status_nibble` rather than exposing that wire-format detail to callers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MidiChannel(u8);
 
@@ -17,11 +21,13 @@ impl MidiChannel {
         self.0
     }
 
+    /// Converts the public channel number into the zero-based MIDI status-byte field.
     pub const fn status_nibble(self) -> u8 {
         self.0 - 1
     }
 }
 
+/// A validated MIDI note number, including the General MIDI drum-note range used by the MVP.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MidiNote(u8);
 
@@ -42,6 +48,7 @@ impl MidiNote {
     }
 }
 
+/// A validated MIDI note-on velocity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MidiVelocity(u8);
 
@@ -62,6 +69,9 @@ impl MidiVelocity {
     }
 }
 
+/// The MIDI messages currently emitted by the sequencer.
+///
+/// Control changes and other message types will be added with the deferred MIDI-control work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MidiMessage {
     NoteOn {
@@ -76,6 +86,7 @@ pub enum MidiMessage {
 }
 
 impl MidiMessage {
+    /// Encodes this high-level message as its three-byte MIDI 1.0 representation.
     pub const fn bytes(self) -> [u8; 3] {
         match self {
             Self::NoteOn {
@@ -87,6 +98,7 @@ impl MidiMessage {
         }
     }
 
+    /// Ensures a note-off is emitted before a same-sample note-on for the same note.
     pub const fn sort_priority(self) -> u8 {
         match self {
             Self::NoteOff { .. } => 0,

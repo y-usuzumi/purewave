@@ -65,6 +65,11 @@ Raspberry Pi 5 is a first-class target, so performance, dependency footprint,
 startup behavior, and real-time safety should be considered during design rather
 than treated as late portability work.
 
+Comments should explain decisions that are difficult to recover from code alone:
+timing math, realtime constraints, ownership/lifetime assumptions, raw API
+boundaries, and recovery behavior. Straightforward assignments and control flow
+need not be narrated.
+
 ## Repository Layout
 
 - `crates/purewave-engine`: reusable sequencing, timing, transport, and MIDI

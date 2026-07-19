@@ -1,6 +1,10 @@
 use crate::midi::MidiMessage;
 use crate::sequencer::{Pattern, Step};
 
+/// The clock data a host or standalone backend supplies for one processing block.
+///
+/// `position_samples` is absolute so the scheduler can reconstruct loop boundaries and note-offs
+/// that began before the current block.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transport {
     pub sample_rate_hz: f64,
@@ -25,21 +29,27 @@ impl Transport {
     }
 }
 
+/// A sample-addressed block being scheduled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockPosition {
     pub start_sample: u64,
     pub frame_count: u32,
 }
 
+/// A MIDI message positioned relative to the start of the caller's current block.
+///
+/// Backends convert `frame_offset` directly into their native sample-offset representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimedMidiEvent {
     pub frame_offset: u32,
     pub message: MidiMessage,
 }
 
+/// The number of events omitted because a realtime caller supplied insufficient storage.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DroppedEventCount(pub usize);
 
+/// Stateless converter from a pattern plus transport clock into sample-positioned MIDI events.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Scheduler;
 
@@ -50,6 +60,8 @@ impl Scheduler {
         transport: Transport,
         frame_count: u32,
     ) -> Vec<TimedMidiEvent> {
+        // Convenience API for non-realtime callers and tests. Audio callbacks should provide
+        // reusable storage through one of the methods below.
         let mut events = Vec::new();
         self.schedule_midi_block_into(pattern, transport, frame_count, &mut events);
         events
@@ -62,6 +74,7 @@ impl Scheduler {
         frame_count: u32,
         events: &mut Vec<TimedMidiEvent>,
     ) {
+        // This form reuses existing capacity but may grow the vector if the pattern requires it.
         events.clear();
 
         if !transport.playing
@@ -89,6 +102,8 @@ impl Scheduler {
         frame_count: u32,
         events: &mut Vec<TimedMidiEvent>,
     ) -> DroppedEventCount {
+        // This is the audio-callback-safe form: reaching capacity drops events instead of
+        // allocating, which keeps scheduling bounded and predictable.
         events.clear();
 
         if !transport.playing
@@ -120,6 +135,8 @@ impl Scheduler {
         let samples_per_step = samples_per_step(pattern, transport);
         let block_start = block.start_sample;
         let block_end = block_start + u64::from(block.frame_count);
+        // Scan one potential gate length before the block so a note-off is found even when its
+        // note-on occurred in an earlier callback.
         let scan_start_step = first_step_to_scan(block_start, samples_per_step);
         let scan_end_step = ((block_end as f64 / samples_per_step).ceil() as i64) + 1;
         let mut dropped = 0;
@@ -129,6 +146,7 @@ impl Scheduler {
                 continue;
             }
 
+            // Absolute steps establish time; modulo maps them back into the looping pattern.
             let pattern_step = absolute_step as usize % pattern.step_count();
             let note_start = sample_for_step(absolute_step, samples_per_step);
 
@@ -174,6 +192,8 @@ impl Scheduler {
             }
         }
 
+        // A coincident note-off precedes a note-on, preventing a retrigger from being immediately
+        // silenced. `sort_unstable` avoids the stable sort's extra allocation requirements.
         events.sort_unstable_by_key(|event| (event.frame_offset, event.message.sort_priority()));
         DroppedEventCount(dropped)
     }
@@ -185,6 +205,7 @@ fn push_event(
     use_existing_capacity: bool,
 ) -> bool {
     if use_existing_capacity && events.len() == events.capacity() {
+        // Caller selected the hard realtime contract, so report the drop instead of growing.
         return true;
     }
 
@@ -193,11 +214,13 @@ fn push_event(
 }
 
 fn samples_per_step(pattern: &Pattern, transport: Transport) -> f64 {
+    // Four sixteenth notes per beat in the MVP; this remains data-driven for future resolutions.
     let samples_per_beat = transport.sample_rate_hz * 60.0 / transport.tempo_bpm;
     samples_per_beat / f64::from(pattern.steps_per_beat)
 }
 
 fn first_step_to_scan(block_start: u64, samples_per_step: f64) -> i64 {
+    // A gate is never longer than one step, so one step before the block is sufficient.
     let earliest_possible_note_start = block_start.saturating_sub(samples_per_step.ceil() as u64);
     (earliest_possible_note_start as f64 / samples_per_step).floor() as i64
 }
@@ -207,6 +230,7 @@ fn sample_for_step(absolute_step: i64, samples_per_step: f64) -> u64 {
 }
 
 fn gate_samples(step: Step, samples_per_step: f64) -> u64 {
+    // Gates are stored musically as percentages and converted only at the sample-clock boundary.
     ((samples_per_step * f64::from(step.gate.percent())) / 100.0).round() as u64
 }
 

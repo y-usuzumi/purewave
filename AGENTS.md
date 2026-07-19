@@ -76,6 +76,9 @@ small, documented, and friendly to future standalone and plugin builds.
   higher-level third-party audio libraries or engines.
 - Favor readable code over performant-but-hacky code. Optimize only with a clear
   realtime reason and keep the result understandable.
+- Add useful comments whenever writing code. Explain timing math, realtime
+  constraints, ownership/lifetime invariants, unsafe or raw-API boundaries, and
+  recovery behavior; do not narrate self-evident assignments or simple flow.
 - Standalone JACK integration should use JACK transport where practical.
 - Keep CoreAudio MIDI timing concerns in mind for future macOS support; do not
   assume MIDI scheduling is independent from audio timing on every platform.

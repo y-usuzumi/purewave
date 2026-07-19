@@ -1,9 +1,11 @@
 use crate::midi::{MidiChannel, MidiNote, MidiVelocity};
 
+/// The MVP's fixed one-bar, sixteenth-note grid size.
 pub const DEFAULT_STEP_COUNT: usize = 16;
 pub const DEFAULT_BEATS_PER_BAR: u8 = 4;
 pub const DEFAULT_STEPS_PER_BEAT: u8 = 4;
 
+/// A named drum lane in the initial grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DrumSound {
     Tom,
@@ -27,6 +29,7 @@ impl DrumSound {
     }
 
     pub const fn default_note(self) -> MidiNote {
+        // General MIDI percussion convention: these notes share channel 10 in the MVP.
         match self {
             Self::Tom => MidiNote::new(45).unwrap(),
             Self::Kick => MidiNote::new(36).unwrap(),
@@ -38,6 +41,7 @@ impl DrumSound {
     }
 }
 
+/// The fraction of a step for which an enabled note remains on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GateLength {
     percent: u8,
@@ -64,6 +68,7 @@ impl GateLength {
     }
 }
 
+/// One editable cell in a track's step grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Step {
     pub enabled: bool,
@@ -74,6 +79,7 @@ pub struct Step {
 
 impl Step {
     pub const fn disabled(note: MidiNote) -> Self {
+        // Retain musical defaults while disabled so enabling a cell is a single state change.
         Self {
             enabled: false,
             note,
@@ -92,6 +98,7 @@ impl Step {
     }
 }
 
+/// A sequencer lane with an output channel and one step per grid position.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Track {
     pub sound: DrumSound,
@@ -111,12 +118,15 @@ impl Track {
     }
 
     pub fn enable_step(&mut self, step_index: usize) {
+        // UI and controller callers can safely attempt out-of-range indices without resizing a
+        // pattern on a realtime-adjacent path.
         if let Some(step) = self.steps.get_mut(step_index) {
             step.enabled = true;
         }
     }
 }
 
+/// A looping grid shared by all tracks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pattern {
     pub beats_per_bar: u8,
@@ -126,6 +136,9 @@ pub struct Pattern {
 
 impl Pattern {
     pub fn default_drum_grid() -> Self {
+        // Channel 10 is the General MIDI percussion channel. Keeping it here rather than in a
+        // backend lets future frontends expose per-track channel assignment without changing the
+        // scheduler.
         let channel = MidiChannel::new(10).unwrap();
         let sounds = [
             DrumSound::Tom,
@@ -149,6 +162,8 @@ impl Pattern {
     }
 
     pub fn step_count(&self) -> usize {
+        // Tracks are expected to have a common length. The empty-pattern case remains defined so
+        // scheduling can simply yield no events during construction or malformed input.
         self.tracks
             .first()
             .map(|track| track.steps.len())
